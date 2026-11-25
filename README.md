@@ -206,3 +206,18 @@ useful diff rather than random churn.
 `SeventySix - Materials.ba2`, DDS output for `ScorchedMaps.ba2`, cubemap sizing and a
 serial-vs-parallel extraction of `SeventySix - 00UpdateStream.ba2`. Those tests skip
 when the game data is missing.
+
+## References
+
+These tools and their sources were used while researching the `.ba2` format and
+cross-checking this implementation:
+
+- Unpackrr — <https://www.nexusmods.com/fallout4/mods/82082>
+- Unpackrr source — <https://github.com/kazum1kun/ba2-batch-unpack-gui>
+- Batch BA2 Unpacker — <https://www.nexusmods.com/fallout4/mods/79593>
+- Batch BA2 Unpacker source — <https://github.com/kazum1kun/ba2-batch-unpack>
+- BSA Browser (with .BA2 support) — <https://www.nexusmods.com/skyrimspecialedition/mods/1756>
+- BSA Browser source — <https://github.com/AlexxEG/BSA_Browser>
+
+The Python tools only drive BSA Browser's `bsab.exe`; the format details and the
+byte-for-byte payload checks came from BSA Browser's `Sharp.BSA.BA2` library.
