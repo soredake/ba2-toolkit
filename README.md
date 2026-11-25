@@ -117,6 +117,20 @@ format is stored verbatim in a `DDS_HEADER_DXT10`, so nothing is lossily convert
 `name table offset`. Fallout 76 writes forward slashes; backslashes are normalised too.
 Paths are sanitised so an archive can never write outside the output directory.
 
+### One format, two payload kinds
+
+Every archive in a Fallout 76 install uses exactly this header: 72 archives in the
+install this was validated against, all version 1 — 55 `GNRL` and 17 `DX10`,
+690 889 entries, no `GNMF` (PlayStation) archives and no newer versions. Only the
+payload semantics vary:
+
+- `GNRL` entries are either stored or a zlib stream; `DX10` entries are split into
+  mip chunks, and individual chunks may be stored too.
+- A cubemap entry holds six faces, so its chunks sum to `6 x` the single-face mip
+  chain. The DDS written on extraction declares `arraySize = 6`.
+- Third-party mod archives in `Data` follow the same layout. Some exporters pad
+  mip data; that is harmless here because every chunk carries its own unpacked size.
+
 ### Limits
 
 - `GNMF` (PlayStation GNF textures) is rejected.
@@ -144,8 +158,29 @@ throughput.
 
 ## Tests
 
-`npm test` runs `node --test` against the installed Fallout 76 archives
+`npm test` runs the suite with `node --test` and needs no game installation. It reads
+the small archives committed under `test/fixtures/`:
+
+| Fixture | Contents |
+| --- | --- |
+| `gnrl.ba2` (770 B) | four entries: a zlib stream, an uncompressed file, a zlib text file and a zero-byte file |
+| `dx10.ba2` (3 KB) | a BC1 texture with a full mip chain, a BC5 texture with two chunks (one compressed, one stored) and a BC3 cubemap |
+
+They use the shipping BTDX version 1 layout and real zlib streams, but the payloads
+are generated, so no Bethesda data is redistributed. `test/fixtures/manifest.json`
+records the expected size and SHA-256 of every entry, which the tests compare against
+the extracted files. The suite covers record and name-table parsing, stored vs
+compressed payloads, DX10 chunks, DDS/DX10 headers, cubemap flags, extraction
+(serial and worker pool), filters, `--flat`, overwrite/skip, dry runs, malformed
+archives and the CLI.
+
+`scripts/make-fixtures.mjs` regenerates the fixtures with `npm run fixtures`. The
+output is deterministic, so a regeneration after a format change should show a
+useful diff rather than random churn.
+
+`test/game-data.test.mjs` additionally validates a real installation
 (`C:/Program Files (x86)/Steam/steamapps/common/Fallout76/Data`, override with
-`FO76_DATA`). It covers GNRL parsing, zlib payloads, DX10 metadata and mip sizes,
-DDS header fields, single-threaded vs parallel extraction equality, filters,
-dry-run and the CLI. Tests are skipped when the game data is not present.
+`FO76_DATA`): a header census of every `.ba2`, GNRL payloads from
+`SeventySix - Materials.ba2`, DDS output for `ScorchedMaps.ba2`, cubemap sizing and a
+serial-vs-parallel extraction of `SeventySix - 00UpdateStream.ba2`. Those tests skip
+when the game data is missing.

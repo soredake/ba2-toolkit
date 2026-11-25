@@ -13,6 +13,7 @@ export interface DxgiFormatInfo {
 
 const FORMATS: Record<number, DxgiFormatInfo> = {
   10: { name: 'R16G16B16A16_FLOAT', blockBytes: 0, bytesPerPixel: 8 },
+  11: { name: 'R16G16B16A16_UNORM', blockBytes: 0, bytesPerPixel: 8 },
   28: { name: 'R8G8B8A8_UNORM', blockBytes: 0, bytesPerPixel: 4 },
   29: { name: 'R8G8B8A8_UNORM_SRGB', blockBytes: 0, bytesPerPixel: 4 },
   49: { name: 'R8G8_UNORM', blockBytes: 0, bytesPerPixel: 2 },

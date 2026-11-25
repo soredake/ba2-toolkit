@@ -1,0 +1,111 @@
+{
+  "generatedBy": "scripts/make-fixtures.mjs",
+  "note": "Synthetic archives in the shipping BTDX version 1 layout; payloads are generated, not game data.",
+  "gnrl": {
+    "file": "gnrl.ba2",
+    "entries": [
+      {
+        "path": "interface/panel.swf",
+        "kind": "GNRL",
+        "size": 1536,
+        "compressed": true,
+        "sha256": "b24ca583e7623652c8443c66d17960061e90e9f3b22e9c0bc0426e0e84b7fc48"
+      },
+      {
+        "path": "materials/steel.bgsm",
+        "kind": "GNRL",
+        "size": 120,
+        "compressed": false,
+        "sha256": "1b6f319c10feddead3d91d17308495801bfcb48327e953d3255245041a8394a7"
+      },
+      {
+        "path": "scripts/config.txt",
+        "kind": "GNRL",
+        "size": 190,
+        "compressed": true,
+        "sha256": "400f5a1a8897ee1101d93bcd21d728ab1b5bc9fe22f57187375be71b7089a6e2"
+      },
+      {
+        "path": "meshes/empty.bin",
+        "kind": "GNRL",
+        "size": 0,
+        "compressed": false,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "dx10": {
+    "file": "dx10.ba2",
+    "entries": [
+      {
+        "path": "textures/wall_d.dds",
+        "kind": "DX10",
+        "width": 128,
+        "height": 64,
+        "mips": 8,
+        "format": 71,
+        "cubemap": false,
+        "tileMode": 8,
+        "payloadSize": 5480,
+        "payloadSha256": "4290bebd924b9ebbc0719d94635c991c90936657f3ddb9d0eca045ef6768cf6b",
+        "size": 5628,
+        "chunks": [
+          {
+            "startMip": 0,
+            "endMip": 7,
+            "unpackedSize": 5480,
+            "compressed": true
+          }
+        ]
+      },
+      {
+        "path": "textures/detail_n.dds",
+        "kind": "DX10",
+        "width": 64,
+        "height": 64,
+        "mips": 4,
+        "format": 83,
+        "cubemap": false,
+        "tileMode": 8,
+        "payloadSize": 5440,
+        "payloadSha256": "75f96d99f9ab1bcb7b6b82ab56bfb78a38300eb5d44ff8c588e4d9a3fd484812",
+        "size": 5588,
+        "chunks": [
+          {
+            "startMip": 0,
+            "endMip": 0,
+            "unpackedSize": 4096,
+            "compressed": true
+          },
+          {
+            "startMip": 1,
+            "endMip": 3,
+            "unpackedSize": 1344,
+            "compressed": false
+          }
+        ]
+      },
+      {
+        "path": "textures/sky_e.dds",
+        "kind": "DX10",
+        "width": 32,
+        "height": 32,
+        "mips": 5,
+        "format": 77,
+        "cubemap": true,
+        "tileMode": 8,
+        "payloadSize": 8256,
+        "payloadSha256": "80d5c994c1e960dcf9208bbe460d66a63ff337dae08080f84bf880eea4bd86c7",
+        "size": 8404,
+        "chunks": [
+          {
+            "startMip": 0,
+            "endMip": 4,
+            "unpackedSize": 8256,
+            "compressed": true
+          }
+        ]
+      }
+    ]
+  }
+}
