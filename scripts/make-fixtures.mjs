@@ -124,7 +124,9 @@ function buildGnrl(entries) {
     file.writeUInt32LE(fnv1a(record.entry.path), base);
     writeExtension(file, base + 4, record.entry.path);
     file.writeUInt32LE(fnv1a(path.posix.dirname(record.entry.path)), base + 8);
-    file.writeUInt32LE(0x00100001, base + 12);
+    file.writeUInt8(0, base + 12); // data file index
+    file.writeUInt8(1, base + 13); // chunk count
+    file.writeUInt16LE(0x10, base + 14); // chunk header size
     writeU64(file, base + 16, payloadOffset);
     file.writeUInt32LE(record.packedSize, base + 24);
     file.writeUInt32LE(record.entry.data.length, base + 28);

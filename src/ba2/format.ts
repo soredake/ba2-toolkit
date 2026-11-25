@@ -8,7 +8,8 @@
  *  0x08  char[4]  "GNRL" | "DX10"
  *  0x0C  u32      file count
  *  0x10  u64      absolute offset of the file name table
- *  [version >= 2: 8 unknown bytes]
+ *  [version 2: 8 unknown bytes]
+ *  [version 3: 8 unknown bytes + u32 compression method, 0 = zlib, 3 = LZ4]
  *
  * The record table starts directly after the header (0x18). Archives keep file
  * paths in a separate table at the end of the file, one `u16 length + bytes`
@@ -33,7 +34,7 @@ export interface Ba2Header {
   kind: ArchiveKind;
   fileCount: number;
   nameTableOffset: number;
-  /** Header bytes omitted when version >= 2 (Starfield). */
+  /** Extra header bytes: 8 for Starfield v2, 12 for v3, 0 otherwise. */
   extraHeaderBytes: number;
   recordTableOffset: number;
 }
@@ -51,7 +52,10 @@ export interface Ba2EntryBase {
 
 export interface GnrlEntry extends Ba2EntryBase {
   kind: 'GNRL';
+  /** Raw u32 at record offset 12: data file index (u8), chunk count (u8), chunk header size (u16). */
   flags: number;
+  chunkCount: number;
+  chunkHeaderSize: number;
   offset: number;
   /** 0 means the payload is stored uncompressed. */
   packedSize: number;

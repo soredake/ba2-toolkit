@@ -342,6 +342,29 @@ test('fixtures: malformed archives fail with clear errors', async () => {
   }
 });
 
+test('fixtures: archive versions pick the right record table offset', () => {
+  // Fallout 4 Next Gen reports version 7/8 but keeps the 24 byte header.
+  const v7 = patchedFixture(gnrlPath, 'v7', (data) => data.writeUInt32LE(7, 4));
+  const nextGen = Ba2Archive.open(v7);
+  try {
+    assert.equal(nextGen.header.version, 7);
+    assert.equal(nextGen.header.extraHeaderBytes, 0);
+    assert.equal(nextGen.header.recordTableOffset, 24);
+    assert.equal(nextGen.entries.length, 4);
+    assert.equal(nextGen.entries[0].path, 'interface/panel.swf');
+    assert.equal(nextGen.readEntry(0).length, 1536);
+  } finally {
+    nextGen.close();
+  }
+
+  // Starfield v3 stores the compression method 8 bytes into the extension.
+  const lz4 = patchedFixture(gnrlPath, 'v3-lz4', (data) => {
+    data.writeUInt32LE(3, 4);
+    data.writeUInt32LE(3, 0x20);
+  });
+  assert.throws(() => Ba2Archive.open(lz4), /LZ4/);
+});
+
 test('fixtures: CLI list and extract', () => {
   const cli = path.join(process.cwd(), 'dist', 'cli.js');
 

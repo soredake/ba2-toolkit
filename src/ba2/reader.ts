@@ -226,17 +226,20 @@ function readHeader(fd: number, path: string, fileSize: number): Ba2Header {
   if (kind === 'GNMF') {
     throw new Error(`${path}: GNMF archives (PlayStation textures) are not supported`);
   }
-  if (version >= 3) {
+  if (version === 3) {
+    // Starfield v3 appends 2 unknown u32 values and a compression method.
     const method = buffer.readUInt32LE(HEADER_SIZE + 8);
     if (method !== 0) {
       throw new Error(
-        `${path}: archive uses compression method ${method}; only zlib (0) is supported`,
+        `${path}: archive uses compression method ${method} (3 = LZ4 block); only zlib (0) is supported`,
       );
     }
   }
   const fileCount = buffer.readUInt32LE(12);
   const nameTableOffset = Number(buffer.readBigUInt64LE(16));
-  const extraHeaderBytes = version >= 2 ? 8 : 0;
+  // Only Starfield extends the header: v2 adds 8 bytes, v3 adds 12. Fallout 4
+  // Next Gen reports v7/v8 but keeps the plain 24 byte header.
+  const extraHeaderBytes = version === 2 ? 8 : version === 3 ? 12 : 0;
   const recordTableOffset = HEADER_SIZE + extraHeaderBytes;
   if (fileCount > 5_000_000) {
     throw new Error(`${path}: implausible file count ${fileCount}, archive looks corrupt`);
@@ -261,6 +264,17 @@ function readRecords(fd: number, header: Ba2Header, fileSize: number): Ba2Entry[
     const entries: GnrlEntry[] = [];
     for (let i = 0; i < count; i++) {
       const base = i * GNRL_RECORD_SIZE;
+      // The record starts with a 16 byte chunk header: hash, extension, dir
+      // hash, data file index, chunk count and chunk header size. Every
+      // shipping file has exactly one 0x10 byte chunk header, which is what
+      // makes the fixed 36 byte stride valid.
+      const chunkCount = table.readUInt8(base + 13);
+      const chunkHeaderSize = table.readUInt16LE(base + 14);
+      if (chunkCount !== 1 || chunkHeaderSize !== 0x10) {
+        throw new Error(
+          `record ${i}: GNRL entries use ${chunkCount} chunk(s) with ${chunkHeaderSize} byte headers; only single 0x10 byte chunks are supported`,
+        );
+      }
       entries.push({
         kind: 'GNRL',
         index: i,
@@ -269,6 +283,8 @@ function readRecords(fd: number, header: Ba2Header, fileSize: number): Ba2Entry[
         nameHash: table.readUInt32LE(base),
         dirHash: table.readUInt32LE(base + 8),
         flags: table.readUInt32LE(base + 12),
+        chunkCount,
+        chunkHeaderSize,
         offset: Number(table.readBigUInt64LE(base + 16)),
         packedSize: table.readUInt32LE(base + 24),
         unpackedSize: table.readUInt32LE(base + 28),

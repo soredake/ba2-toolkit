@@ -75,19 +75,29 @@ All integers are little endian.
 
 ```
 0x00 char[4] "BTDX"
-0x04 u32     version          1 = Fallout 4 / Fallout 76
+0x04 u32     version          1 = Fallout 4 / Fallout 76, 7/8 = Fallout 4 Next Gen
 0x08 char[4] "GNRL" | "DX10"
 0x0C u32     file count
 0x10 u64     absolute offset of the name table
 0x18 …       records, then payloads, then the name table
 ```
 
+Starfield extends the header: version 2 adds 8 unknown bytes and version 3 adds
+those plus a `u32` compression method (`0` = zlib, `3` = LZ4 block). The extra
+bytes are selected by exact version, because Fallout 4 Next Gen reports version 7
+or 8 with the plain 24 byte header.
+
 **GNRL record — 36 bytes**, in file order:
 
 ```
-u32 name hash | char[4] extension | u32 dir hash | u32 flags
+u32 name hash | char[4] extension | u32 dir hash
+u8 data file index (0) | u8 chunk count (1) | u16 chunk header size (0x10)
 u64 data offset | u32 packed size | u32 unpacked size | u32 0xBAADF00D
 ```
+
+That is a 16 byte chunk header followed by a single 20 byte chunk, which is what
+makes the fixed 36 byte stride valid; all 448 524 records in a Fallout 76 install
+have exactly one chunk with a `0x10` byte header.
 
 `packed size != 0` means the payload is a zlib stream (`78 9c`, `78 da`, or a
 small-window `48 c7` header) whose output must equal `unpacked size`; otherwise the
@@ -97,7 +107,7 @@ bytes are stored as-is.
 are interleaved, *not* one flat header array):
 
 ```
-u32 name hash | char[4] extension | u32 dir hash | u8 unknown | u8 chunk count
+u32 name hash | char[4] extension | u32 dir hash | u8 data file index | u8 chunk count
 u16 chunk header size (0x18) | u16 height | u16 width | u8 mip count
 u8 DXGI format | u8 is cubemap | u8 tile mode (8 = PC)
 ```
@@ -130,6 +140,13 @@ payload semantics vary:
   chain. The DDS written on extraction declares `arraySize = 6`.
 - Third-party mod archives in `Data` follow the same layout. Some exporters pad
   mip data; that is harmless here because every chunk carries its own unpacked size.
+
+### Archive versions
+
+Fallout 76 ships only version 1 archives, which is what the tests here exercise
+against real data. The reader also accepts zlib Starfield v2/v3 archives by
+skipping their extra header bytes; LZ4 v3 archives are rejected rather than
+guessed at, and the Next Gen v7/v8 headers are read as plain version 1.
 
 ### Limits
 
@@ -173,6 +190,11 @@ the extracted files. The suite covers record and name-table parsing, stored vs
 compressed payloads, DX10 chunks, DDS/DX10 headers, cubemap flags, extraction
 (serial and worker pool), filters, `--flat`, overwrite/skip, dry runs, malformed
 archives and the CLI.
+
+The payloads were also cross-checked byte for byte against BSA Browser's
+`Sharp.BSA.BA2` reader: all 30 170 entries of `SeventySix - Materials.ba2` and 800
+textures from `SeventySix - Textures01.ba2` came out identical, and that reader
+also parses the fixtures above.
 
 `scripts/make-fixtures.mjs` regenerates the fixtures with `npm run fixtures`. The
 output is deterministic, so a regeneration after a format change should show a
