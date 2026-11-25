@@ -1,10 +1,10 @@
 /**
  * Binary layout constants and shared types for Bethesda BA2 ("BTDX") archives.
  *
- * Layout (all little endian), taken from the shipping Fallout 76 archives:
+ * Layout (all little endian), taken from shipping Fallout 4 / Fallout 76 archives:
  *
  *  0x00  char[4]  "BTDX"
- *  0x04  u32      version          (1 = Fallout 4 / Fallout 76)
+ *  0x04  u32      version          (1 = Fallout 4 / Fallout 76, 7/8 = Fallout 4 Next Gen)
  *  0x08  char[4]  "GNRL" | "DX10"
  *  0x0C  u32      file count
  *  0x10  u64      absolute offset of the file name table

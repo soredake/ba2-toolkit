@@ -1,8 +1,27 @@
-# ba2-extractor-fallout76
+# ba2-extractor
 
-Fast reader and extractor for Bethesda **BA2** (`BTDX`) archives, written in TypeScript
-for Node.js and tuned for the multi-gigabyte archives that ship with **Fallout 76**
-(the same format is used by Fallout 4).
+Reader and extractor for Bethesda **BA2** (`BTDX`) archives, written in TypeScript for
+Node.js and tuned for the multi-gigabyte archives that ship with Fallout 4, Fallout 76
+and Starfield.
+
+## Supported games
+
+| Game | BA2 versions | Support |
+| --- | --- | --- |
+| Fallout 4 (original) | 1 | `GNRL` and `DX10`, including DDS reconstruction |
+| Fallout 4 Next Gen | 7, 8 | Same 24-byte header and records as version 1 |
+| Fallout 76 | 1 | `GNRL` and `DX10`; byte-validated against all 72 shipping archives |
+| Starfield | 2, 3 | zlib `GNRL`/`DX10`; v3 LZ4-block archives are rejected with a clear error |
+| Skyrim, Oblivion, Morrowind | BSA, not BA2 | Not supported — different container |
+
+The container is detected from the file itself (magic, version and `GNRL`/`DX10` tag),
+not from the game or the archive name, so any game shipping plain BTDX archives uses the
+same code path. Out of scope: `GNMF` (PlayStation GNF textures), Xbox-tiled textures and
+BA2 files with more than one chunk per `GNRL` entry.
+
+Fallout 76 is the only install that was available for the byte-level checks here;
+Fallout 4 shares the same version 1 layout, while the version 2/3/7/8 header offsets are
+covered by unit tests but not by real archives in this repository.
 
 - Reads the archive table once, then fetches payloads with positional reads, so a
   4 GiB archive never has to fit in memory. The format is documented in
@@ -52,7 +71,7 @@ case-insensitive, so `--filter "*.dds"` selects every texture.
 ## Library
 
 ```ts
-import { Ba2Archive, extractArchive } from 'ba2-extractor-fallout76';
+import { Ba2Archive, extractArchive } from 'ba2-extractor';
 
 const archive = Ba2Archive.open('SeventySix - Textures01.ba2');
 const entry = archive.entries[0];        // parsed record: path, sizes, chunks…
@@ -134,12 +153,14 @@ also parses the fixtures above.
 output is deterministic, so a regeneration after a format change should show a
 useful diff rather than random churn.
 
-`test/game-data.test.mjs` additionally validates a real installation
-(`C:/Program Files (x86)/Steam/steamapps/common/Fallout76/Data`, override with
-`FO76_DATA`): a header census of every `.ba2`, GNRL payloads from
-`SeventySix - Materials.ba2`, DDS output for `ScorchedMaps.ba2`, cubemap sizing and a
-serial-vs-parallel extraction of `SeventySix - 00UpdateStream.ba2`. Those tests skip
-when the game data is missing.
+`test/game-data.test.mjs` additionally validates a real installation: a header census
+of every `.ba2`, GNRL payloads from `SeventySix - Materials.ba2`, DDS output for
+`ScorchedMaps.ba2`, cubemap sizing and a serial-vs-parallel extraction of
+`SeventySix - 00UpdateStream.ba2`. It looks in
+`C:/Program Files (x86)/Steam/steamapps/common/Fallout76/Data` by default; set
+`BA2_DATA` (or `FO76_DATA`) to any game's `Data` folder. The census accepts every known
+version, and tests for archives that are not installed are skipped, so it also runs
+against a Fallout 4 or Starfield install.
 
 ## References
 

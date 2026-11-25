@@ -10,9 +10,17 @@ import path from 'node:path';
 import { extractArchive } from '../dist/index.js';
 
 const DATA_DIR =
-  process.env.FO76_DATA ?? 'C:/Program Files (x86)/Steam/steamapps/common/Fallout76/Data';
+  process.env.BA2_DATA ??
+  process.env.FO76_DATA ??
+  'C:/Program Files (x86)/Steam/steamapps/common/Fallout76/Data';
 const archive = process.argv[2] ?? path.join(DATA_DIR, 'SeventySix - Meshes.ba2');
 const filter = process.argv[3] ?? 'meshes/architecture/*';
+
+if (!fs.existsSync(archive)) {
+  console.error(`archive not found: ${archive}`);
+  console.error('usage: node scripts/bench.mjs <archive.ba2> [filter]');
+  process.exit(1);
+}
 
 const runs = [
   { label: '1 thread ', threads: 1 },

@@ -4,7 +4,9 @@ This document describes the Bethesda **BA2** container as it appears in Fallout 
 Fallout 76, how its payloads are compressed, and how to turn texture records into
 usable `.dds` files. It is the reference for the code in `src/ba2/` and records what
 was measured on a real Fallout 76 install (72 archives, 690 889 entries, all version
-1: 55 `GNRL` and 17 `DX10`).
+1: 55 `GNRL` and 17 `DX10`). The reader is game-agnostic — it dispatches on the header,
+not on the game — so the same rules apply to any BTDX archive; see the support table in
+[README.md](README.md#supported-games).
 
 Everything here was cross-checked against BSA Browser's `Sharp.BSA.BA2` reader and the
 UESP BTDX notes; see [References](#references). Details that only exist in Starfield or
@@ -386,7 +388,7 @@ const data = packedSize ? zlib.inflateSync(stored) : stored;
 With this package the same work is:
 
 ```ts
-import { Ba2Archive, extractArchive, buildDdsHeader } from 'ba2-extractor-fallout76';
+import { Ba2Archive, extractArchive, buildDdsHeader } from 'ba2-extractor';
 
 const archive = Ba2Archive.open('SeventySix - Textures01.ba2');
 const entry = archive.entries[0];

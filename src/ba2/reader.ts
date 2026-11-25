@@ -2,8 +2,8 @@
  * BA2 archive reader.
  *
  * The archive is opened once and kept open; every file payload is fetched with
- * positional reads, so multi-gigabyte Fallout 76 archives never have to be
- * loaded into memory.
+ * positional reads, so multi-gigabyte archives never have to be loaded into
+ * memory.
  */
 import fs from 'node:fs';
 import zlib from 'node:zlib';

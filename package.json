@@ -1,7 +1,17 @@
 {
-  "name": "ba2-extractor-fallout76",
+  "name": "ba2-extractor",
   "version": "0.1.0",
-  "description": "Fast BA2 (BTDX) archive reader and extractor for Fallout 76 / Fallout 4",
+  "description": "BA2 (BTDX) archive reader and extractor for Fallout 4, Fallout 76 and Starfield",
+  "keywords": [
+    "ba2",
+    "btdx",
+    "bethesda",
+    "fallout4",
+    "fallout76",
+    "starfield",
+    "archive",
+    "dds"
+  ],
   "license": "MIT",
   "type": "module",
   "engines": {

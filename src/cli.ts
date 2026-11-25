@@ -10,7 +10,9 @@ import { compileFilter, extractArchive } from './ba2/extract.js';
 import { dxgiFormatName } from './ba2/dxgi.js';
 import { entryCompression, entryUnpackedSize } from './ba2/format.js';
 
-const HELP = `ba2 - Fallout 76 / Fallout 4 BA2 (BTDX) archive tool
+const HELP = `ba2 - Bethesda BA2 (BTDX) archive tool
+
+Works with Fallout 4 (including Next Gen), Fallout 76 and zlib Starfield archives.
 
 Usage:
   ba2 info <archive.ba2...>
