@@ -1,0 +1,28 @@
+{
+  "name": "ba2-extractor-fallout76",
+  "version": "0.1.0",
+  "description": "Fast BA2 (BTDX) archive reader and extractor for Fallout 76 / Fallout 4",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "ba2": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/",
+    "bench": "node scripts/bench.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
