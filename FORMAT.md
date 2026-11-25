@@ -472,7 +472,58 @@ texture.
 - **4 GiB archives** are routine (`SeventySix - Textures01.ba2` is 4 194 135 355 bytes);
   use `u64` offsets and positional reads rather than loading the archive.
 
-## 8. Validation
+## 8. Official archiver (Archive2)
+
+Fallout 4's Creation Kit ships `Tools/Archive2/Archive2.exe`, the tool Bethesda uses to
+build these archives (`BA2 Archiver Version 1.1.0.5 for Fallout 4`). Its usage:
+
+```text
+Archive2 <archive, files/folders> [<arguments>]
+  -create|c=<name>            create an archive
+  -extract|e=<dir>            extract to a folder
+  -createSourceFile|csf=<dir> write a source file from an archive
+  -sourceFile|s=<file>        list of files to archive
+  -root|r=<dir>               archive root (otherwise a Data folder is assumed)
+  -format|f=<General|DDS|XBoxDDS>
+  -compression=<None|Default|XBox>
+  -count=<n>                  split into n archives
+  -maxSizeMB|sMB=<n>          split by size
+  -maxChunkCount|mch=<n>      default 4
+  -singleMipChunkX|mipX=<n>   default 512
+  -singleMipChunkY|mipY=<n>   default 512
+  -nostrings                  do not write a name table
+  -quiet|q, -tempFiles, -cleanup
+  -includeFilters=?, -excludeFilters=?
+  -?                          usage
+```
+
+Observed behaviour of that build:
+
+- It writes **version 8** for both `General` and `DDS` archives, with the plain 24-byte
+  header. Anything that assumes "version 1 means Fallout 4" is wrong for this tool, and
+  the version gating in §1 is what makes those archives readable.
+- `-compression=Default` compresses every non-empty payload, even when the zlib stream
+  ends up larger than the source (a 120-byte file was stored as 131 bytes).
+  `-compression=None` stores payloads verbatim.
+- Zero-length files are skipped instead of recorded.
+- `-nostrings` writes `name table offset = 0`; records then carry only hashes and
+  extensions, so extraction has to synthesise names.
+- The chunking defaults explain the shipping layout in §2.3: at most 4 chunks per
+  texture, and a mip only gets its own chunk when both dimensions are at least 512
+  (`singleMipChunkX/Y`). That is exactly the 4096 / 2048 / 1024 / tail split.
+- Extracting `DX10` writes a 128-byte DDS header with a legacy FourCC (`DXT5`, `DXT1`,
+  …). The mip payload behind it is byte-identical to this reader's output; only the
+  header style differs (§4.1).
+- It imports `.dds` files using that same header (or this reader's DX10 header)
+  correctly, but refuses cubemaps with "features not supported by the archiver".
+- It reads shipping Fallout 76 version 1 archives and extracts them byte-identically to
+  this reader, which is the strongest validation in §9.
+
+`test/fixtures/archive2/` contains three archives this tool wrote from synthetic
+payloads, so version 8, `-nostrings` and Archive2-created `DX10` records are covered by
+`npm test` without game data. See the README there for the exact commands.
+
+## 9. Validation
 
 - 72 archives from a Fallout 76 install, 690 889 entries: all version 1, 55 `GNRL` and
   17 `DX10`; 63 archives pass every structural check. The remaining entries are cubemaps
@@ -481,10 +532,13 @@ texture.
 - Payloads compared byte for byte with BSA Browser's `Sharp.BSA.BA2` reader: all 30 170
   entries of `SeventySix - Materials.ba2` and 800 textures from
   `SeventySix - Textures01.ba2` were identical.
+- Bethesda's own Archive2 extracted all 30 170 `SeventySix - Materials.ba2` entries and
+  both `ScorchedMaps.ba2` textures to the same bytes this reader produces (the DDS files
+  differ only in header style), and it extracted the synthetic fixtures correctly.
 - Pillow decoded generated DDS files (BC1, BC3, BC5, R8) to the expected images; it
   rejects only sRGB DXGI codes, which is a Pillow limitation, not a header problem.
 
-## 9. Limits
+## 10. Limits
 
 - `GNMF` (PlayStation GNF) is rejected.
 - LZ4 block compression (Starfield v3, method 3) is rejected; zlib v2/v3 headers are

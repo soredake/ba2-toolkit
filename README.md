@@ -21,7 +21,12 @@ BA2 files with more than one chunk per `GNRL` entry.
 
 Fallout 76 is the only install that was available for the byte-level checks here;
 Fallout 4 shares the same version 1 layout, while the version 2/3/7/8 header offsets are
-covered by unit tests but not by real archives in this repository.
+covered by unit tests.
+
+Bethesda's own `Archive2.exe` (from the Fallout 4 Creation Kit) is the second reference:
+it extracts shipping F76 archives to the same bytes this reader produces, and three
+archives it wrote are part of the fixture suite. Note that this Archive2 build writes
+version 8, not version 1 — which is why the header version is handled explicitly.
 
 - Reads the archive table once, then fetches payloads with positional reads, so a
   4 GiB archive never has to fit in memory. The format is documented in
@@ -135,6 +140,9 @@ the small archives committed under `test/fixtures/`:
 | --- | --- |
 | `gnrl.ba2` (770 B) | four entries: a zlib stream, an uncompressed file, a zlib text file and a zero-byte file |
 | `dx10.ba2` (3 KB) | a BC1 texture with a full mip chain, a BC5 texture with two chunks (one compressed, one stored) and a BC3 cubemap |
+| `archive2/general-v8.ba2` (727 B) | version 8 GNRL archive written by Bethesda's Archive2 (zero-byte file skipped) |
+| `archive2/dds-v8.ba2` (1.1 KB) | Archive2 DX10 records built by importing the fixture DDS files |
+| `archive2/nostrings-v8.ba2` (19 KB) | version 8 GNRL archive with `name table offset = 0` |
 
 They use the shipping BTDX version 1 layout and real zlib streams, but the payloads
 are generated, so no Bethesda data is redistributed. `test/fixtures/manifest.json`
@@ -147,7 +155,9 @@ archives and the CLI.
 The payloads were also cross-checked byte for byte against BSA Browser's
 `Sharp.BSA.BA2` reader: all 30 170 entries of `SeventySix - Materials.ba2` and 800
 textures from `SeventySix - Textures01.ba2` came out identical, and that reader
-also parses the fixtures above.
+also parses the fixtures above. Bethesda's `Archive2` extracted the same 30 170 files
+identically, and it reads the committed fixtures too — including the ones it wrote
+itself (`test/fixtures/archive2/`), which cover version 8 and name-table-less archives.
 
 `scripts/make-fixtures.mjs` regenerates the fixtures with `npm run fixtures`. The
 output is deterministic, so a regeneration after a format change should show a

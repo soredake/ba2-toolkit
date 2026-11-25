@@ -365,6 +365,84 @@ test('fixtures: archive versions pick the right record table offset', () => {
   assert.throws(() => Ba2Archive.open(lz4), /LZ4/);
 });
 
+test('fixtures: archives written by Bethesda Archive2', async () => {
+  const archive2 = (name) => path.join(FIXTURE_DIR, 'archive2', name);
+
+  // General archive, version 8, zlib, no zero-length entry (Archive2 skips those).
+  const general = Ba2Archive.open(archive2('general-v8.ba2'));
+  try {
+    assert.equal(general.header.version, 8);
+    assert.equal(general.header.extraHeaderBytes, 0);
+    assert.equal(general.header.recordTableOffset, 24);
+    assert.equal(general.entries.length, manifest.gnrl.entries.filter((e) => e.size > 0).length);
+    for (const entry of general.entries) {
+      assert.equal(entry.chunkCount, 1);
+      assert.equal(entry.chunkHeaderSize, 0x10);
+      const expected = manifest.gnrl.entries.find((e) => e.path === entry.path);
+      assert.ok(expected, entry.path);
+      assert.equal(sha256(general.readEntry(entry)), expected.sha256, entry.path);
+    }
+    // Archive2's default compression can grow a payload; it still inflates correctly.
+    assert.ok(general.entries.some((entry) => entry.packedSize > entry.unpackedSize));
+  } finally {
+    general.close();
+  }
+
+  // DDS archive: official DX10 records built from this reader's DDS files.
+  const textures = Ba2Archive.open(archive2('dds-v8.ba2'));
+  try {
+    assert.equal(textures.header.version, 8);
+    assert.equal(textures.header.kind, 'DX10');
+    assert.deepEqual(
+      textures.entries.map((entry) => entry.path).sort(),
+      ['textures/detail_n.dds', 'textures/wall_d.dds'],
+    );
+    for (const entry of textures.entries) {
+      const expected = manifest.dx10.entries.find((e) => e.path === entry.path);
+      assert.ok(expected, entry.path);
+      assert.equal(entry.dxgiFormat, expected.format);
+      assert.equal(entry.width, expected.width);
+      assert.equal(entry.height, expected.height);
+      assert.equal(entry.mipCount, expected.mips);
+      const dds = textures.readEntry(entry);
+      assert.equal(dds.length, DDS_HEADER_SIZE + expected.payloadSize);
+      assert.equal(sha256(dds.subarray(DDS_HEADER_SIZE)), expected.payloadSha256);
+    }
+  } finally {
+    textures.close();
+  }
+
+  // No name table: entries still resolve to synthetic names and extract correctly.
+  const noNames = Ba2Archive.open(archive2('nostrings-v8.ba2'));
+  try {
+    assert.equal(noNames.header.nameTableOffset, 0);
+    assert.deepEqual(
+      noNames.entries.map((entry) => entry.path),
+      ['unnamed/0.dds', 'unnamed/1.dds', 'unnamed/2.dds'],
+    );
+    const source = Ba2Archive.open(dx10Path);
+    const expected = new Set(source.entries.map((entry) => sha256(source.readEntry(entry))));
+    source.close();
+    for (const entry of noNames.entries) {
+      assert.ok(expected.has(sha256(noNames.readEntry(entry))), entry.path);
+    }
+
+    const out = tempDir('archive2-names');
+    const result = await extractArchive(archive2('nostrings-v8.ba2'), {
+      outDir: out,
+      threads: 1,
+    });
+    assert.equal(result.errors.length, 0);
+    assert.deepEqual([...walk(out).keys()].sort(), [
+      'unnamed/0.dds',
+      'unnamed/1.dds',
+      'unnamed/2.dds',
+    ]);
+  } finally {
+    noNames.close();
+  }
+});
+
 test('fixtures: CLI list and extract', () => {
   const cli = path.join(process.cwd(), 'dist', 'cli.js');
 
