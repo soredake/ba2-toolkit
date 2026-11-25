@@ -1,4 +1,4 @@
-# ba2-extractor
+# ba2-toolkit
 
 Reader and extractor for Bethesda **BA2** (`BTDX`) archives, written in TypeScript for
 Node.js and tuned for the multi-gigabyte archives that ship with Fallout 4, Fallout 76
@@ -76,7 +76,7 @@ case-insensitive, so `--filter "*.dds"` selects every texture.
 ## Library
 
 ```ts
-import { Ba2Archive, extractArchive } from 'ba2-extractor';
+import { Ba2Archive, extractArchive } from 'ba2-toolkit';
 
 const archive = Ba2Archive.open('SeventySix - Textures01.ba2');
 const entry = archive.entries[0];        // parsed record: path, sizes, chunks…

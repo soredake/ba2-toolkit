@@ -332,6 +332,271 @@ const dx10 = buildDx10([
   },
 ]);
 
+// ---- LZ4 block compressor (minimal, for v3 fixture only; not part of the lib) ----
+
+/** Hash table for LZ4 match finding. Maps a 4-byte value to the last position it was seen. */
+const LZ4_HASH_SIZE = 16384;
+const LZ4_HASH_MASK = LZ4_HASH_SIZE - 1;
+
+function lz4Hash(ptr) {
+  // cheap 4-byte hash
+  return ((ptr[0] << 5) ^ (ptr[1] << 3) ^ (ptr[2] << 1) ^ ptr[3]) & LZ4_HASH_MASK;
+}
+
+/** Encode a raw LZ4 block. Input must be <= 64 MiB. Output is a valid LZ4 block. */
+function encodeLZ4Block(input) {
+  const ip = input; // input position
+  const iEnd = input.length;
+  const out = [];
+  const hashes = new Int32Array(LZ4_HASH_SIZE);
+  hashes.fill(-1);
+
+  let anchor = 0; // last position we know has no match
+  let pos = 0;
+
+  // prefill hash table
+  for (let i = 0; i + 4 <= iEnd && i < 65536; i++) {
+    hashes[lz4Hash(ip.subarray(i, i + 4))] = i;
+  }
+
+  const emitLiterals = (start, end) => {
+    let len = end - start;
+    // token high nibble
+    out.push(len < 15 ? len : 15);
+    let left = len - 15;
+    while (left >= 0) {
+      const b = left >= 255 ? 255 : left;
+      out.push(b);
+      left -= b;
+      if (b < 255) break;
+    }
+    for (let i = start; i < end; i++) out.push(ip[i]);
+  };
+
+  const emitMatch = (offset, length) => {
+    out.push(offset & 0xff);
+    out.push((offset >> 8) & 0xff);
+    let len = length - 4; // low nibble encodes length-4
+    out.push(len < 15 ? len : 15);
+    let left = len - 15;
+    while (left >= 0) {
+      const b = left >= 255 ? 255 : left;
+      out.push(b);
+      left -= b;
+      if (b < 255) break;
+    }
+  };
+
+  while (pos < iEnd) {
+    // find a match at pos
+    let matchPos = -1;
+    let matchLen = 0;
+    if (pos + 4 <= iEnd) {
+      const h = lz4Hash(ip.subarray(pos, pos + 4));
+      const cand = hashes[h];
+      if (cand !== -1 && cand < pos) {
+        const off = pos - cand;
+        if (off <= 65535 && ip[cand] === ip[pos] && ip[cand + 1] === ip[pos + 1]) {
+          matchPos = cand;
+          matchLen = 2;
+          while (matchLen < 128 && pos + matchLen < iEnd && ip[matchPos + matchLen] === ip[pos + matchLen]) {
+            matchLen++;
+          }
+          if (matchLen < 4) { matchPos = -1; matchLen = 0; }
+        }
+      }
+    }
+
+    if (matchPos === -1 || pos - matchPos > 65535) {
+      // no match; advance anchor
+      pos++;
+      // update hash for the new position
+      if (pos + 4 <= iEnd) hashes[lz4Hash(ip.subarray(pos, pos + 4))] = pos;
+      continue;
+    }
+
+    // flush literals from anchor to pos
+    if (pos > anchor) emitLiterals(anchor, pos);
+    // emit match
+    emitMatch(pos - matchPos, matchLen);
+    // advance hashes past the match
+    for (let i = 0; i < matchLen && pos + i + 4 <= iEnd; i++) {
+      hashes[lz4Hash(ip.subarray(pos + i, pos + i + 4))] = pos + i;
+    }
+    pos += matchLen;
+    anchor = pos;
+  }
+
+  // final literals-only sequence (end of block)
+  if (anchor < iEnd) emitLiterals(anchor, iEnd);
+  else {
+    // edge case: input ends exactly at a match boundary; emit a zero token
+    out.push(0); // token with 0 literals, 0 match length (ignored as end-of-block)
+  }
+
+  return Buffer.from(out);
+}
+
+function encodeRawDeflate(data) {
+  // Node zlib can produce raw deflate (no zlib header/trailer).
+  const packed = zlib.deflateRawSync(data, { level: 9 });
+  if (packed.length >= data.length) {
+    throw new Error(`raw-deflate payload did not compress (${packed.length} >= ${data.length})`);
+  }
+  return packed;
+}
+
+// ---- v3 LZ4 GNRL archive (Starfield compression method 3) ----
+{
+  const LZ4_METHOD = 3;
+  const HEADER_V3_SIZE = HEADER_SIZE + 12; // 24 + 8 unknown u32s + 4 method
+  const lz4Entries = buildGnrl([
+    { path: 'textures/wall.dds', data: pattern(2048, 11), compress: true },
+    { path: 'scripts/config.txt', data: Buffer.from(configText, 'utf8'), compress: true },
+  ]);
+  // Re-encode each entry's stored payload with LZ4 instead of zlib.
+  const lz4Records = lz4Entries.entries.map((e, i) => {
+    const raw = lz4Entries // buildGnrl already compressed with zlib; decompress to get original
+      ; // We need the original data; rebuild it.
+    return e;
+  });
+  // Simpler: rebuild the two entries' raw data, LZ4-compress, and hand-build the archive.
+  const rawWall = pattern(2048, 11);
+  const rawTxt = Buffer.from(configText, 'utf8');
+  const lz4Wall = encodeLZ4Block(rawWall);
+  const lz4Txt = encodeLZ4Block(rawTxt);
+  if (lz4Wall.length >= rawWall.length) throw new Error('LZ4 wall did not compress');
+  if (lz4Txt.length >= rawTxt.length) throw new Error('LZ4 txt did not compress');
+
+  const lz4PayloadBytes = lz4Wall.length + lz4Txt.length;
+  const nameTableOffset = HEADER_V3_SIZE + GNRL_RECORD_SIZE * 2 + lz4PayloadBytes;
+  const nameBytes = [
+    Buffer.from('textures/wall.dds', 'utf8'),
+    Buffer.from('scripts/config.txt', 'utf8'),
+  ].reduce((s, n) => s + 2 + n.length, 0);
+  const file = Buffer.alloc(nameTableOffset + nameBytes);
+
+  file.write('BTDX', 0, 'latin1');
+  file.writeUInt32LE(3, 4); // version 3
+  file.write('GNRL', 8, 'latin1');
+  file.writeUInt32LE(2, 12); // file count
+  writeU64(file, 16, nameTableOffset);
+  // 8 unknown bytes (zero)
+  file.writeUInt32LE(0, HEADER_SIZE);
+  file.writeUInt32LE(0, HEADER_SIZE + 4);
+  // compression method = LZ4 (3) at HEADER_SIZE + 8
+  file.writeUInt32LE(LZ4_METHOD, HEADER_SIZE + 8);
+
+  let payloadOffset = HEADER_V3_SIZE + GNRL_RECORD_SIZE * 2;
+  const rawEntries = [
+    { path: 'textures/wall.dds', raw: rawWall, packed: lz4Wall },
+    { path: 'scripts/config.txt', raw: rawTxt, packed: lz4Txt },
+  ];
+  rawEntries.forEach((entry, index) => {
+    const base = HEADER_V3_SIZE + index * GNRL_RECORD_SIZE;
+    file.writeUInt32LE(fnv1a(entry.path), base);
+    writeExtension(file, base + 4, entry.path);
+    file.writeUInt32LE(fnv1a(path.posix.dirname(entry.path)), base + 8);
+    file.writeUInt8(0, base + 12);
+    file.writeUInt8(1, base + 13);
+    file.writeUInt16LE(0x10, base + 14);
+    writeU64(file, base + 16, payloadOffset);
+    file.writeUInt32LE(entry.packed.length, base + 24);
+    file.writeUInt32LE(entry.raw.length, base + 28);
+    file.writeUInt32LE(SENTINEL, base + 32);
+    entry.packed.copy(file, payloadOffset);
+    payloadOffset += entry.packed.length;
+  });
+
+  let nameOffset = nameTableOffset;
+  for (const name of [Buffer.from('textures/wall.dds', 'utf8'), Buffer.from('scripts/config.txt', 'utf8')]) {
+    file.writeUInt16LE(name.length, nameOffset);
+    name.copy(file, nameOffset + 2);
+    nameOffset += 2 + name.length;
+  }
+
+  const lz4ManifestEntries = rawEntries.map((entry) => ({
+    path: entry.path,
+    kind: 'GNRL',
+    size: entry.raw.length,
+    compressed: true,
+    sha256: sha256(entry.raw),
+  }));
+
+  fs.writeFileSync(path.join(OUT_DIR, 'v3-lz4.ba2'), file);
+  process.stdout.write(`test/fixtures/v3-lz4.ba2: ${file.length} bytes (LZ4 block, v3)\n`);
+
+  // round-trip sanity: decode with the lib and compare
+  const { Ba2Archive } = await import('../dist/index.js');
+  const arch = Ba2Archive.open(path.join(OUT_DIR, 'v3-lz4.ba2'));
+  try {
+    for (let i = 0; i < arch.entries.length; i++) {
+      const data = arch.readEntry(arch.entries[i]);
+      if (!rawEntries[i].raw.equals(data)) throw new Error(`v3-lz4 round-trip failed for ${rawEntries[i].path}`);
+    }
+  } finally {
+    arch.close();
+  }
+
+  // attach to manifest
+  manifest.lz4 = { file: 'v3-lz4.ba2', entries: lz4ManifestEntries };
+}
+
+// ---- v1 GNRL archive with one raw-deflate payload ----
+{
+  const rawDeflateEntries = [
+    { path: 'data.bin', data: pattern(1024, 7), compress: true },
+  ];
+  // Rebuild with raw deflate
+  const raw = pattern(1024, 7);
+  const packed = encodeRawDeflate(raw);
+  const nameTableOffset = HEADER_SIZE + GNRL_RECORD_SIZE + packed.length;
+  const nameBytes = Buffer.from('data.bin', 'utf8').length + 2;
+  const file = Buffer.alloc(nameTableOffset + nameBytes);
+
+  file.write('BTDX', 0, 'latin1');
+  file.writeUInt32LE(1, 4);
+  file.write('GNRL', 8, 'latin1');
+  file.writeUInt32LE(1, 12);
+  writeU64(file, 16, nameTableOffset);
+
+  const base = HEADER_SIZE;
+  file.writeUInt32LE(fnv1a('data.bin'), base);
+  writeExtension(file, base + 4, 'data.bin');
+  file.writeUInt32LE(fnv1a(''), base + 8);
+  file.writeUInt8(0, base + 12);
+  file.writeUInt8(1, base + 13);
+  file.writeUInt16LE(0x10, base + 14);
+  writeU64(file, base + 16, HEADER_SIZE + GNRL_RECORD_SIZE);
+  file.writeUInt32LE(packed.length, base + 24);
+  file.writeUInt32LE(raw.length, base + 28);
+  file.writeUInt32LE(SENTINEL, base + 32);
+  packed.copy(file, HEADER_SIZE + GNRL_RECORD_SIZE);
+
+  let nameOffset = nameTableOffset;
+  const name = Buffer.from('data.bin', 'utf8');
+  file.writeUInt16LE(name.length, nameOffset);
+  name.copy(file, nameOffset + 2);
+
+  fs.writeFileSync(path.join(OUT_DIR, 'raw-deflate.ba2'), file);
+  process.stdout.write(`test/fixtures/raw-deflate.ba2: ${file.length} bytes (raw deflate, v1)\n`);
+
+  // round-trip sanity
+  const { Ba2Archive } = await import('../dist/index.js');
+  const arch = Ba2Archive.open(path.join(OUT_DIR, 'raw-deflate.ba2'));
+  try {
+    const data = arch.readEntry(arch.entries[0]);
+    if (!raw.equals(data)) throw new Error('raw-deflate round-trip failed');
+  } finally {
+    arch.close();
+  }
+
+  manifest.rawDeflate = {
+    file: 'raw-deflate.ba2',
+    entries: [{ path: 'data.bin', kind: 'GNRL', size: raw.length, compressed: true, sha256: sha256(raw) }],
+  };
+}
+
 const manifest = {
   generatedBy: 'scripts/make-fixtures.mjs',
   note: 'Synthetic archives in the shipping BTDX version 1 layout; payloads are generated, not game data.',

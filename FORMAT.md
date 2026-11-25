@@ -388,7 +388,7 @@ const data = packedSize ? zlib.inflateSync(stored) : stored;
 With this package the same work is:
 
 ```ts
-import { Ba2Archive, extractArchive, buildDdsHeader } from 'ba2-extractor';
+import { Ba2Archive, extractArchive, buildDdsHeader } from 'ba2-toolkit';
 
 const archive = Ba2Archive.open('SeventySix - Textures01.ba2');
 const entry = archive.entries[0];
