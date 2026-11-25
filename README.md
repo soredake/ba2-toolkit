@@ -103,8 +103,21 @@ version 1 archives in two flavours — `GNRL` (whole files, 36-byte records) and
 
 [FORMAT.md](FORMAT.md) is the full specification: every field and offset, version and
 compression differences, the DDS/DX10 header layout, mip-size math, cubemap and tiling
-rules, a worked hexdump, an extraction walkthrough with code snippets, and the
-validation numbers.
+rules, a worked hexdump, an extraction walkthrough with code snippets, the official
+Archive2 behaviour, and the validation numbers.
+
+### The Fallout 4 Creation Kit is Bethesda's own validator
+
+The Fallout 4 Creation Kit ships `Tools/Archive2/Archive2.exe` (build 1.1.0.5). Even
+though the install in this repository is the Creation Kit only (its `Data` folder has no
+`.ba2` files), Archive2 was invaluable for two cross-validations:
+
+- It extracted every real Fallout 76 archive tested — all 30 170 `SeventySix - Materials.ba2`
+  entries and both `ScorchedMaps.ba2` textures matched this reader byte-for-byte.
+- It wrote three archives from the synthetic fixtures (`test/fixtures/archive2/`), including
+  one **version 8** archive. That is the direct reason the reader now handles version 7/8
+  with the plain 24-byte header. The exact commands (absolute paths required) and the
+  Archive2 CLI flags are documented in [FORMAT.md](FORMAT.md#official-archiver-archive2).
 
 ### Limits
 
