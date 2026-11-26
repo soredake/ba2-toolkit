@@ -1,25 +1,37 @@
 #!/usr/bin/env node
 /**
- * Command line interface: info / list / extract.
+ * Command line interface: info / list / extract / create.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { Ba2Archive } from './ba2/reader.js';
 import { compileFilter, extractArchive } from './ba2/extract.js';
+import { createArchive } from './ba2/writer.js';
 import { dxgiFormatName } from './ba2/dxgi.js';
 import { entryCompression, entryUnpackedSize } from './ba2/format.js';
 
 const HELP = `ba2 - Bethesda BA2 (BTDX) archive tool
 
-Works with Fallout 4 (including Next Gen), Fallout 76 and zlib Starfield archives.
+Works with Fallout 4 (including Next Gen), Fallout 76 and Starfield archives
+(zlib and LZ4), and creates new archives.
 
 Usage:
   ba2 info <archive.ba2...>
   ba2 list <archive.ba2...> [--filter <glob>] [--json] [--limit <n>]
   ba2 extract <archive.ba2...> --out <dir> [options]
+  ba2 create <archive.ba2> <source-dir> [options]
 
-Options:
+Create options:
+      --format <f>     GNRL (general files) or DX10 (textures). Default:
+                       auto-detect - any .dds file selects DX10.
+      --compression <c>  zlib (default), none (store), lz4 (version 3 only).
+      --version <n>    Archive version: 1, 2, 3, 7 or 8 (default 8).
+      --max-chunks <n> Maximum texture chunks (default 4, like Archive2).
+      --chunk-size <n> Mip size that starts its own chunk (default 512).
+      --nostrings      Omit the name table (paths become unnamed/NN.ext).
+
+Extract options:
   -o, --out <dir>     Output directory (required for extract).
       --filter <g>    Only entries whose path matches the glob (case-insensitive,
                       '*' matches across directories). Quote it in your shell.
@@ -39,6 +51,9 @@ Examples:
   ba2 info "C:/Program Files (x86)/Steam/steamapps/common/Fallout76/Data/SeventySix - Textures01.ba2"
   ba2 extract "SeventySix - Meshes.ba2" -o out --filter "*.nif" --threads 8
   ba2 list "SeventySix - Materials.ba2" --filter "*.bgsm" --limit 20
+  ba2 create MyMod - Textures.ba2 ./textures            # auto-detects DX10
+  ba2 create patch.ba2 ./loose --format GNRL --compression none
+  ba2 create starfield.ba2 ./assets --version 3 --compression lz4
 `;
 
 function formatBytes(bytes: number): string {
@@ -85,6 +100,13 @@ function main(): void {
       'dry-run': { type: 'boolean' },
       json: { type: 'boolean' },
       limit: { type: 'string' },
+      // create options
+      format: { type: 'string' },
+      compression: { type: 'string' },
+      version: { type: 'string' },
+      nostrings: { type: 'boolean' },
+      'max-chunks': { type: 'string' },
+      'chunk-size': { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -93,6 +115,41 @@ function main(): void {
     process.stdout.write(HELP);
     return;
   }
+
+  if (command === 'create') {
+    const [output, source] = positionals;
+    if (!output || !source) {
+      fail('error: create needs an output archive and a source directory (see ba2 --help)');
+    }
+    if (!fs.statSync(source).isDirectory()) {
+      fail(`error: ${source} is not a directory`);
+    }
+    const compression = values.compression ?? 'zlib';
+    if (compression !== 'zlib' && compression !== 'none' && compression !== 'lz4') {
+      fail(`error: unknown --compression ${JSON.stringify(compression)} (zlib, none or lz4)`);
+    }
+    const format = values.format ?? undefined;
+    if (format !== undefined && format !== 'GNRL' && format !== 'DX10') {
+      fail(`error: unknown --format ${JSON.stringify(format)} (GNRL or DX10)`);
+    }
+    // LZ4 needs Starfield v3; pick it automatically unless told otherwise.
+    const requestedVersion = values.version !== undefined ? Number(values.version) : undefined;
+    void createArchive(output, source, {
+      format,
+      compression,
+      version: requestedVersion ?? (compression === 'lz4' ? 3 : undefined),
+      maxChunks: values['max-chunks'] !== undefined ? Number(values['max-chunks']) : undefined,
+      singleMipChunkSize: values['chunk-size'] !== undefined ? Number(values['chunk-size']) : undefined,
+      noStrings: Boolean(values.nostrings),
+    }).then(() => {
+      const size = fs.statSync(output).size;
+      process.stdout.write(`created ${output} (${formatBytes(size)})\n`);
+    }, (error: unknown) => {
+      fail(`error: ${(error as Error).message}`);
+    });
+    return;
+  }
+
   const archives = positionals;
   if (archives.length === 0) fail('error: no archive given (see ba2 --help)');
 
@@ -144,32 +201,34 @@ function info(archives: string[], json: boolean): void {
   summaries.forEach((summary, index) => {
     if (index > 0) process.stdout.write('\n');
     const h = summary.header;
+    const codec = summary.compressedFiles > 0 ? summary.compression : 'none';
     process.stdout.write(`${summary.path}\n`);
-    process.stdout.write(`  format     : ${h.kind}, version ${h.version}\n`);
-    process.stdout.write(`  files      : ${summary.fileCount}\n`);
+    process.stdout.write(`  format      : ${h.kind}, version ${h.version}\n`);
+    process.stdout.write(`  files       : ${summary.fileCount}\n`);
+    process.stdout.write(`  compression : ${codec}\n`);
     process.stdout.write(
-      `  payload    : ${formatBytes(summary.unpackedBytes)} unpacked, ${formatBytes(summary.storedBytes)} stored\n`,
+      `  payload     : ${formatBytes(summary.unpackedBytes)} unpacked, ${formatBytes(summary.storedBytes)} stored\n`,
     );
     process.stdout.write(
-      `  compressed : ${summary.compressedFiles} payload block(s) zlib\n`,
+      `  compressed  : ${summary.compressedFiles} payload block(s)\n`,
     );
     if (summary.extensions.length > 0) {
       const list = summary.extensions
         .slice(0, 8)
         .map((item) => `${item.extension || '(none)'} ${item.count}`)
         .join(', ');
-      process.stdout.write(`  extensions : ${list}\n`);
+      process.stdout.write(`  extensions  : ${list}\n`);
     }
     if (summary.formats.length > 0) {
       const list = summary.formats
         .slice(0, 8)
         .map((item) => `${item.name} ${item.count}`)
         .join(', ');
-      process.stdout.write(`  textures   : ${list}\n`);
-      if (summary.cubemaps > 0) process.stdout.write(`  cubemaps   : ${summary.cubemaps}\n`);
+      process.stdout.write(`  textures    : ${list}\n`);
+      if (summary.cubemaps > 0) process.stdout.write(`  cubemaps    : ${summary.cubemaps}\n`);
       if (summary.nonPcTiling > 0) {
         process.stdout.write(
-          `  warning    : ${summary.nonPcTiling} Xbox tiled texture(s) cannot be written as DDS\n`,
+          `  warning     : ${summary.nonPcTiling} Xbox tiled texture(s) cannot be written as DDS\n`,
         );
       }
     }
@@ -185,19 +244,21 @@ function list(
   for (const file of archives) {
     const archive = Ba2Archive.open(file);
     try {
+      const codec = archive.compression;
       let printed = 0;
       for (const entry of archive.entries) {
         if (!matches(entry)) continue;
         if (options.limit !== undefined && printed >= options.limit) break;
         printed++;
-        const compressed = entryCompression(entry) === 'zlib';
+        const compression = entryCompression(entry, codec);
         if (options.json) {
           rows.push({
             archive: file,
             path: entry.path,
             kind: entry.kind,
             size: entryUnpackedSize(entry),
-            compressed,
+            compressed: compression !== 'none',
+            compression,
             ...(entry.kind === 'DX10'
               ? {
                   width: entry.width,
@@ -211,7 +272,7 @@ function list(
           });
         } else {
           const size = entryUnpackedSize(entry).toString().padStart(12);
-          const kind = entry.kind === 'DX10' ? 'DX10' : compressed ? 'zlib' : 'raw ';
+          const kind = entry.kind === 'DX10' ? 'DX10' : compression === 'none' ? 'raw ' : compression;
           process.stdout.write(`${size}  ${kind}  ${entry.path}\n`);
         }
       }

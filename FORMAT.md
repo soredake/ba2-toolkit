@@ -190,22 +190,80 @@ to raw deflate if zlib framing fails, but nothing in the shipping game needs tha
 
 ### 3.2 LZ4 block (Starfield version 3, method `3`)
 
-Version 3 archives can replace zlib with raw LZ4 **block** compression. The compression
-choice is archive-wide; individual chunks still signal "uncompressed" with
-`packedSize == 0`. A block is a sequence of tokens:
+Version 3 archives can replace zlib with raw LZ4 **block** compression. The choice is
+archive-wide and lives in the header extension (§1); individual records still signal
+"stored verbatim" with `packedSize == 0`. Each compressed payload — one `GNRL` file or
+one `DX10` chunk — is exactly one raw block: no LZ4 frame header, no checksum and no
+size prefix, because the record already carries the unpacked size.
 
-- one token byte: high nibble = literal length, low nibble = match length − 4;
-- a length nibble of `15` means "add the following bytes, each `0xFF` adds 255, stop at
-  the first byte below 255";
-- copy that many literal bytes;
-- if the input is exhausted, the block ends (the last sequence has literals only);
-- otherwise read a 2-byte little-endian back-reference offset, copy `match length` bytes
-  from the already-produced output (overlapping copies are valid), and continue.
+A block is a sequence of *sequences*. Each one is
 
-This project rejects LZ4 archives with an explicit error; implementing the block decoder
-is the only gap for reading Starfield textures.
+```
+token (1 byte) | literal-length extension | literals | offset (2 bytes LE) | match-length extension | match bytes
+```
 
-### 3.3 Validation rules that catch corruption
+- token high nibble = literal length (0-14 direct, `15` = 15 + extension);
+- token low nibble = match length − 4 (0 → 4 … 14 → 18, `15` = 19 + extension);
+- an extension is a 255 chain: add each byte, keep reading while the byte is `0xFF`,
+  stop at the first byte below 255;
+- the offset is little endian, 1-65535; `0` is invalid;
+- the match copies from `output[pos - offset]` **byte by byte**, so an offset smaller
+  than the match length repeats bytes that are being produced (offset 1 repeats the
+  previous byte);
+- the block ends when the input is exhausted right after a literal run. The last
+  sequence is therefore literals-only, and the token's low nibble is unused.
+
+```
+while (ip < block.length) {
+  token = block[ip++]
+  literalLength = token >> 4; if (literalLength == 15) literalLength = extend(ip)
+  copy literalLength bytes
+  if (ip == block.length) break        // final literals-only sequence
+  offset = u16le(block[ip]); ip += 2
+  matchLength = (token & 15) + 4; if ((token & 15) == 15) matchLength = 19 + extend(ip)
+  copy matchLength bytes from output[outPos - offset], one at a time
+}
+assert outPos == unpackedSize
+```
+
+Details that matter for BA2:
+
+- **The end of the block is implicit.** A decoder must not stop on a byte count; it
+  stops when the input runs out after a literal run.
+- **Exact output size.** The block must produce exactly `unpackedSize` bytes; a mismatch
+  is corruption, not something to pad or truncate.
+- **Reference-decoder compatibility.** `LZ4_decompress_safe` and every consumer built on
+  it (K4os, libbsarch, the Rust `btdx`/`bsa` crates) also require the last 5 bytes of the
+  block to be literals. Encoders must leave them: this project's encoder keeps the last
+  5 bytes literal and starts no match within the last 12 (`LITERAL_LIMIT`/`MFLIMIT`), so
+  its blocks decode in all of those tools.
+- **Blocks can grow their input.** Incompressible data costs one framing byte per 255
+  input bytes plus 16, so a record with `packedSize > unpackedSize` is legal. The reader
+  handles it; shipping Starfield archives mostly leave such chunks stored instead.
+- `archive2` cannot be used to validate this path: that build has no LZ4 mode and cannot
+  write version 3 (§8). The decoder is validated against the block-format specification
+  and against an independent implementation instead (§9).
+
+Both directions are implemented: `Ba2Archive.readEntry`/`readChunks` decode method 3, and
+`ba2 create --version 3 --compression lz4` writes it.
+
+### 3.3 How the reference tools handle compression
+
+Every tool examined, and what it actually does with compressed payloads:
+
+| Tool | zlib | LZ4 block | Notes |
+| --- | --- | --- | --- |
+| `Archive2.exe` 1.1.0.5 (official CK tool) | read + write | none | `-compression=None` stores, `Default` = zlib (`78 9C`, 32 KiB window), `XBox` = zlib with a 4 KiB window (`48 C7`). Always writes version 8, so it cannot produce or read Starfield v3. |
+| BSA Browser / `Sharp.BSA.BA2` | read | `DX10` chunks only | `CompressionUtils.DecompressLZ4` calls `K4os.Compression.LZ4.LZ4Codec.Decode` with the chunk's unpacked size. The `GNRL` path only ever runs SharpZipLib's `Inflater`, so LZ4 `GNRL` files are unsupported there. Its header parser also reads the compression method from the **first** unknown `u32` (`0x18`) and tests for `1` instead of `0x20`/`3`, which does not match any v3 archive layout; do not use it as a v3 reference. |
+| Unpackrr (`ba2-batch-unpack-gui`) | delegates | delegates | Selection/threshold wrapper around `bsab.exe`; it contains no archive codec of its own. |
+| Batch BA2 Unpacker (`ba2-batch-unpack`) | delegates | delegates | Shells out to `bsab.exe` for every archive; no format code. |
+| lz4js | n/a | both | Independent JavaScript port of the reference C codec, used here for conformance (§9). Its block encoder refuses to emit a block when it finds no match at all, so literal-only vectors are built from the specification. |
+
+In short: the only shipped codec besides zlib is LZ4, only Starfield uses it, and no
+reference tool here implements both directions of it, which is why the decoder is
+cross-checked against an independent LZ4 implementation rather than another BA2 tool.
+
+### 3.4 Validation rules that catch corruption
 
 A strict reader should check, and this one does:
 
@@ -502,9 +560,23 @@ Observed behaviour of that build:
 - It writes **version 8** for both `General` and `DDS` archives, with the plain 24-byte
   header. Anything that assumes "version 1 means Fallout 4" is wrong for this tool, and
   the version gating in §1 is what makes those archives readable.
-- `-compression=Default` compresses every non-empty payload, even when the zlib stream
-  ends up larger than the source (a 120-byte file was stored as 131 bytes).
-  `-compression=None` stores payloads verbatim.
+- Its three compression modes were measured by archiving the same sources three times
+  and reading the results back:
+
+  | `-compression` | payloads | zlib header | behaviour |
+  | --- | --- | --- | --- |
+  | `None` | `packedSize = 0` | — | stored verbatim |
+  | `Default` | every non-empty payload | `78 9C` | 32 KiB window; compresses even when the stream grows |
+  | `XBox` | every non-empty payload | `48 C7` | zlib with a 4 KiB window (`CINFO = 4`), otherwise the same |
+
+  `Default` compresses every payload even when the zlib stream ends up larger than the
+  source (a 120-byte file was stored as 131 bytes). `XBox` produced the same file sizes
+  here and differs only in the two header bytes of each stream (4 bytes across a two-file
+  archive), because a 4 KiB window loses most of the long-range matches. All three modes
+  extracted to byte-identical files, so `XBox` needs no special case when reading.
+- There is **no LZ4 mode**: this build has no Starfield support, writes version 8 only,
+  and therefore cannot create or read a v3 archive. `-compression` accepts exactly
+  `None`, `Default` and `XBox`; anything else is a usage error.
 - Zero-length files are skipped instead of recorded.
 - `-nostrings` writes `name table offset = 0`; records then carry only hashes and
   extensions, so extraction has to synthesise names.
@@ -537,12 +609,34 @@ payloads, so version 8, `-nostrings` and Archive2-created `DX10` records are cov
   differ only in header style), and it extracted the synthetic fixtures correctly.
 - Pillow decoded generated DDS files (BC1, BC3, BC5, R8) to the expected images; it
   rejects only sRGB DXGI codes, which is a Pillow limitation, not a header problem.
+- The LZ4 codec (no BA2 reference tool implements both directions, §3.3) was checked
+  against **lz4js**, an independent port of the reference C implementation, in both
+  directions over 75 blocks / 4.21 MiB: every block from lz4js's encoder decoded
+  identically here, and every block from this encoder decoded identically in lz4js
+  (which enforces the reference decoder's last-5-literals rule). The corpus covers empty
+  and 1-byte inputs, literal lengths past 255, matches of 4 to ~60 000 bytes, offsets of
+  1, 4, 16 384 and 60 000, 1 MiB of text, zeros, alternating bytes and incompressible
+  noise. `test/fixtures/lz4/reference-blocks.json` keeps eleven of those blocks, with the
+  gzip-compressed expected output, so the decoder is tested against a foreign encoder on
+  every `npm test`.
+- The v3 archive path itself is covered by a committed fixture (`test/fixtures/v3-lz4.ba2`,
+  method 3, two `GNRL` payloads) and by writer round-trips for `GNRL` and multi-chunk
+  `DX10` archives.
+- Real game data was pushed through the LZ4 writer as well, using
+  `scripts/verify-roundtrip.mjs` (extract, rebuild as v3 LZ4, compare every entry):
+  `SeventySix - Materials.ba2` (30 170 `GNRL` files, 12.5 MB) and `ScorchedMaps.ba2`
+  (2 textures, 8 chunks, 42.7 MB) both came back byte-for-byte identical, which exercises
+  LZ4 blocks from a few bytes to several megabytes.
 
 ## 10. Limits
 
 - `GNMF` (PlayStation GNF) is rejected.
-- LZ4 block compression (Starfield v3, method 3) is rejected; zlib v2/v3 headers are
-  accepted and parsed, but no Starfield archive was available here to exercise them.
+- LZ4 support follows the block-format specification and the header layout used by
+  every other v3 implementation; no Starfield installation was available here, so the
+  committed fixture and writer round-trips are the only v3 archives exercised. Bethesda's
+  `Archive2` cannot read or write them either (it predates Starfield).
+- Compression methods other than `0` (zlib) and `3` (LZ4) in a v3 header are rejected
+  with an explicit error instead of being guessed at.
 - `GNRL` archives with more than one chunk per file are rejected, because their record
   stride differs from the 36-byte layout.
 - Xbox tiled textures cannot be written as usable DDS.

@@ -10,6 +10,7 @@ import zlib from 'node:zlib';
 import {
   BA2_ALIGN_SENTINEL,
   BA2_MAGIC,
+  archiveCompression,
   DX10_CHUNK_SIZE,
   DX10_RECORD_SIZE,
   GNRL_RECORD_SIZE,
@@ -18,12 +19,14 @@ import {
   type ArchiveKind,
   type Ba2Entry,
   type Ba2Header,
+  type Compression,
   type GnrlEntry,
   type TextureChunk,
   type TextureEntry,
 } from './format.js';
 import { buildDdsHeader } from './dds.js';
 import { dxgiFormatName } from './dxgi.js';
+import { decodeLZ4Block } from './lz4.js';
 
 const MAX_NAME_TABLE_BYTES = 256 * 1024 * 1024;
 
@@ -35,6 +38,9 @@ export interface ArchiveSummary {
   unpackedBytes: number;
   /** Bytes of payload actually stored in the archive. */
   storedBytes: number;
+  /** Codec used by every compressed payload in this archive. */
+  compression: Compression;
+  /** Number of compressed payload blocks (GNRL files and DX10 chunks). */
   compressedFiles: number;
   formats: { format: number; name: string; count: number }[];
   extensions: { extension: string; count: number }[];
@@ -104,12 +110,14 @@ export class Ba2Archive {
 
   /** Decompressed bytes of one stored payload (without the DDS header). */
   readChunks(entry: TextureEntry): Buffer[] {
+    const method = this.header.compressionMethod;
     return entry.chunks.map((chunk, index) =>
       readPayload(
         this.readStored(chunk.offset, chunk.packedSize || chunk.unpackedSize),
         chunk.packedSize,
         chunk.unpackedSize,
         `${entry.path} chunk ${index}`,
+        method,
       ),
     );
   }
@@ -130,6 +138,7 @@ export class Ba2Archive {
         resolved.packedSize,
         resolved.unpackedSize,
         resolved.path,
+        this.header.compressionMethod,
       );
     }
     if (resolved.tileMode !== TILE_MODE_PC) {
@@ -155,6 +164,11 @@ export class Ba2Archive {
     }
     const parts = [buildDdsHeader(entry), ...this.readChunks(entry)];
     return { parts, size: parts.reduce((sum, part) => sum + part.length, 0) };
+  }
+
+  /** Codec of compressed payloads in this archive (`zlib` or `lz4`). */
+  get compression(): Compression {
+    return archiveCompression(this.header);
   }
 
   summary(): ArchiveSummary {
@@ -188,6 +202,7 @@ export class Ba2Archive {
       path: this.path,
       header: this.header,
       fileCount: this.entries.length,
+      compression: this.compression,
       unpackedBytes,
       storedBytes,
       compressedFiles,
@@ -226,12 +241,13 @@ function readHeader(fd: number, path: string, fileSize: number): Ba2Header {
   if (kind === 'GNMF') {
     throw new Error(`${path}: GNMF archives (PlayStation textures) are not supported`);
   }
+  let compressionMethod = 0;
   if (version === 3) {
     // Starfield v3 appends 2 unknown u32 values and a compression method.
-    const method = buffer.readUInt32LE(HEADER_SIZE + 8);
-    if (method !== 0) {
+    compressionMethod = buffer.readUInt32LE(HEADER_SIZE + 8);
+    if (compressionMethod !== 0 && compressionMethod !== 3) {
       throw new Error(
-        `${path}: archive uses compression method ${method} (3 = LZ4 block); only zlib (0) is supported`,
+        `${path}: archive uses compression method ${compressionMethod}; only zlib (0) and LZ4 (3) are supported`,
       );
     }
   }
@@ -252,6 +268,7 @@ function readHeader(fd: number, path: string, fileSize: number): Ba2Header {
     nameTableOffset,
     extraHeaderBytes,
     recordTableOffset,
+    compressionMethod,
   };
 }
 
@@ -475,8 +492,18 @@ function readPayload(
   packedSize: number,
   unpackedSize: number,
   label: string,
+  method = 0,
 ): Buffer {
   if (packedSize === 0) return stored;
+  if (method === 3) {
+    const out = decodeLZ4Block(stored, { maxOutput: unpackedSize });
+    if (out.length !== unpackedSize) {
+      throw new Error(
+        `${label}: LZ4-decoded ${out.length} bytes but the archive says ${unpackedSize}`,
+      );
+    }
+    return out;
+  }
   let out: Buffer;
   try {
     out = zlib.inflateSync(stored);

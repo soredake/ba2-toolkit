@@ -2,12 +2,20 @@
 /**
  * Builds the committed test fixtures in `test/fixtures/`.
  *
- * The fixtures use the exact on-disk layout of the shipping Fallout 76
- * archives (BTDX version 1, 36 byte GNRL records / 24 byte DX10 records with
- * interleaved 24 byte chunk headers, `u16 length + bytes` name table), but the
+ * The fixtures use the exact on-disk layout of the shipping archives, but the
  * payloads are synthetic so the repository stays small and free of game data.
- * One GNRL entry is stored, the rest are real zlib streams; one DX10 entry
- * splits its mip chain over two chunks and stores one of them uncompressed.
+ *
+ * - `gnrl.ba2`, `dx10.ba2`: BTDX version 1 (Fallout 4 / 76 layout, zlib).
+ *   One GNRL entry is stored, the rest are real zlib streams; one DX10 entry
+ *   splits its mip chain over two chunks and stores one of them uncompressed.
+ * - `v3-lz4.ba2`: BTDX version 3 (Starfield), 12 byte header extension with
+ *   compression method 3, both GNRL payloads are raw LZ4 blocks.
+ * - `raw-deflate.ba2`: BTDX version 1 with a deflate stream that has no zlib
+ *   wrapper, exercising the reader's raw-deflate fallback.
+ *
+ * The LZ4 blocks come from the library's own encoder, so the script needs
+ * `npm run build` first. LZ4 conformance against an independent implementation
+ * is covered by `test/fixtures/lz4/reference-blocks.json`.
  *
  * The output is deterministic: running this script twice produces identical
  * bytes, so `test/fixtures/*.ba2` can be committed.
@@ -22,6 +30,15 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.resolve(HERE, '..', 'test', 'fixtures');
+fs.mkdirSync(OUT_DIR, { recursive: true });
+
+/** Manifest describing every committed fixture; filled in as each one is built. */
+const manifest = {
+  generatedBy: 'scripts/make-fixtures.mjs',
+  note: 'Synthetic archives; payloads are generated, not game data.',
+  gnrl: null,
+  dx10: null,
+};
 const SENTINEL = 0xbaadf00d;
 const TILE_MODE_PC = 8;
 const HEADER_SIZE = 24;
@@ -332,111 +349,6 @@ const dx10 = buildDx10([
   },
 ]);
 
-// ---- LZ4 block compressor (minimal, for v3 fixture only; not part of the lib) ----
-
-/** Hash table for LZ4 match finding. Maps a 4-byte value to the last position it was seen. */
-const LZ4_HASH_SIZE = 16384;
-const LZ4_HASH_MASK = LZ4_HASH_SIZE - 1;
-
-function lz4Hash(ptr) {
-  // cheap 4-byte hash
-  return ((ptr[0] << 5) ^ (ptr[1] << 3) ^ (ptr[2] << 1) ^ ptr[3]) & LZ4_HASH_MASK;
-}
-
-/** Encode a raw LZ4 block. Input must be <= 64 MiB. Output is a valid LZ4 block. */
-function encodeLZ4Block(input) {
-  const ip = input; // input position
-  const iEnd = input.length;
-  const out = [];
-  const hashes = new Int32Array(LZ4_HASH_SIZE);
-  hashes.fill(-1);
-
-  let anchor = 0; // last position we know has no match
-  let pos = 0;
-
-  // prefill hash table
-  for (let i = 0; i + 4 <= iEnd && i < 65536; i++) {
-    hashes[lz4Hash(ip.subarray(i, i + 4))] = i;
-  }
-
-  const emitLiterals = (start, end) => {
-    let len = end - start;
-    // token high nibble
-    out.push(len < 15 ? len : 15);
-    let left = len - 15;
-    while (left >= 0) {
-      const b = left >= 255 ? 255 : left;
-      out.push(b);
-      left -= b;
-      if (b < 255) break;
-    }
-    for (let i = start; i < end; i++) out.push(ip[i]);
-  };
-
-  const emitMatch = (offset, length) => {
-    out.push(offset & 0xff);
-    out.push((offset >> 8) & 0xff);
-    let len = length - 4; // low nibble encodes length-4
-    out.push(len < 15 ? len : 15);
-    let left = len - 15;
-    while (left >= 0) {
-      const b = left >= 255 ? 255 : left;
-      out.push(b);
-      left -= b;
-      if (b < 255) break;
-    }
-  };
-
-  while (pos < iEnd) {
-    // find a match at pos
-    let matchPos = -1;
-    let matchLen = 0;
-    if (pos + 4 <= iEnd) {
-      const h = lz4Hash(ip.subarray(pos, pos + 4));
-      const cand = hashes[h];
-      if (cand !== -1 && cand < pos) {
-        const off = pos - cand;
-        if (off <= 65535 && ip[cand] === ip[pos] && ip[cand + 1] === ip[pos + 1]) {
-          matchPos = cand;
-          matchLen = 2;
-          while (matchLen < 128 && pos + matchLen < iEnd && ip[matchPos + matchLen] === ip[pos + matchLen]) {
-            matchLen++;
-          }
-          if (matchLen < 4) { matchPos = -1; matchLen = 0; }
-        }
-      }
-    }
-
-    if (matchPos === -1 || pos - matchPos > 65535) {
-      // no match; advance anchor
-      pos++;
-      // update hash for the new position
-      if (pos + 4 <= iEnd) hashes[lz4Hash(ip.subarray(pos, pos + 4))] = pos;
-      continue;
-    }
-
-    // flush literals from anchor to pos
-    if (pos > anchor) emitLiterals(anchor, pos);
-    // emit match
-    emitMatch(pos - matchPos, matchLen);
-    // advance hashes past the match
-    for (let i = 0; i < matchLen && pos + i + 4 <= iEnd; i++) {
-      hashes[lz4Hash(ip.subarray(pos + i, pos + i + 4))] = pos + i;
-    }
-    pos += matchLen;
-    anchor = pos;
-  }
-
-  // final literals-only sequence (end of block)
-  if (anchor < iEnd) emitLiterals(anchor, iEnd);
-  else {
-    // edge case: input ends exactly at a match boundary; emit a zero token
-    out.push(0); // token with 0 literals, 0 match length (ignored as end-of-block)
-  }
-
-  return Buffer.from(out);
-}
-
 function encodeRawDeflate(data) {
   // Node zlib can produce raw deflate (no zlib header/trailer).
   const packed = zlib.deflateRawSync(data, { level: 9 });
@@ -450,17 +362,8 @@ function encodeRawDeflate(data) {
 {
   const LZ4_METHOD = 3;
   const HEADER_V3_SIZE = HEADER_SIZE + 12; // 24 + 8 unknown u32s + 4 method
-  const lz4Entries = buildGnrl([
-    { path: 'textures/wall.dds', data: pattern(2048, 11), compress: true },
-    { path: 'scripts/config.txt', data: Buffer.from(configText, 'utf8'), compress: true },
-  ]);
-  // Re-encode each entry's stored payload with LZ4 instead of zlib.
-  const lz4Records = lz4Entries.entries.map((e, i) => {
-    const raw = lz4Entries // buildGnrl already compressed with zlib; decompress to get original
-      ; // We need the original data; rebuild it.
-    return e;
-  });
-  // Simpler: rebuild the two entries' raw data, LZ4-compress, and hand-build the archive.
+  // The encoder lives in the library; `npm run build` has to run first.
+  const { encodeLZ4Block } = await import('../dist/ba2/lz4.js');
   const rawWall = pattern(2048, 11);
   const rawTxt = Buffer.from(configText, 'utf8');
   const lz4Wall = encodeLZ4Block(rawWall);
@@ -597,14 +500,9 @@ function encodeRawDeflate(data) {
   };
 }
 
-const manifest = {
-  generatedBy: 'scripts/make-fixtures.mjs',
-  note: 'Synthetic archives in the shipping BTDX version 1 layout; payloads are generated, not game data.',
-  gnrl: { file: 'gnrl.ba2', entries: gnrl.entries },
-  dx10: { file: 'dx10.ba2', entries: dx10.entries },
-};
+manifest.gnrl = { file: 'gnrl.ba2', entries: gnrl.entries };
+manifest.dx10 = { file: 'dx10.ba2', entries: dx10.entries };
 
-fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(path.join(OUT_DIR, 'gnrl.ba2'), gnrl.file);
 fs.writeFileSync(path.join(OUT_DIR, 'dx10.ba2'), dx10.file);
 fs.writeFileSync(path.join(OUT_DIR, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);

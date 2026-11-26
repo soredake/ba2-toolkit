@@ -37,6 +37,11 @@ export interface Ba2Header {
   /** Extra header bytes: 8 for Starfield v2, 12 for v3, 0 otherwise. */
   extraHeaderBytes: number;
   recordTableOffset: number;
+  /**
+   * Starfield v3 payload compression method: 0 = zlib, 3 = LZ4 block.
+   * 0 for all other versions.
+   */
+  compressionMethod: number;
 }
 
 export interface Ba2EntryBase {
@@ -94,14 +99,34 @@ export function isGnrlEntry(entry: Ba2Entry): entry is GnrlEntry {
   return entry.kind === 'GNRL';
 }
 
-/** Compression of a stored payload, derived from its packed size. */
-export type Compression = 'none' | 'zlib';
+/**
+ * Codec of a stored payload. `none` means the record's packed size is 0 and
+ * the bytes are verbatim; the other values are the archive-wide codec of a
+ * compressed payload.
+ */
+export type Compression = 'none' | 'zlib' | 'lz4';
 
-export function entryCompression(entry: Ba2Entry): Compression {
-  if (isTextureEntry(entry)) {
-    return entry.chunks.some((chunk) => chunk.packedSize > 0) ? 'zlib' : 'none';
-  }
-  return entry.packedSize > 0 ? 'zlib' : 'none';
+/**
+ * Archive-wide codec declared by the header: Starfield v3 records its
+ * compression method (3 = LZ4 block), every other version is zlib.
+ */
+export function archiveCompression(header: Ba2Header): Compression {
+  return header.version === 3 && header.compressionMethod === 3 ? 'lz4' : 'zlib';
+}
+
+/**
+ * Compression of one entry. Pass the archive codec (see
+ * `archiveCompression`) so LZ4 archives are not reported as zlib; it defaults
+ * to zlib because that is the codec of every version except Starfield v3.
+ */
+export function entryCompression(
+  entry: Ba2Entry,
+  compression: Compression = 'zlib',
+): Compression {
+  const packed = isTextureEntry(entry)
+    ? entry.chunks.some((chunk) => chunk.packedSize > 0)
+    : entry.packedSize > 0;
+  return packed ? compression : 'none';
 }
 
 export function entryUnpackedSize(entry: Ba2Entry): number {

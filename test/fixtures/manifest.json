@@ -1,6 +1,6 @@
 {
   "generatedBy": "scripts/make-fixtures.mjs",
-  "note": "Synthetic archives in the shipping BTDX version 1 layout; payloads are generated, not game data.",
+  "note": "Synthetic archives; payloads are generated, not game data.",
   "gnrl": {
     "file": "gnrl.ba2",
     "entries": [
@@ -105,6 +105,37 @@
             "compressed": true
           }
         ]
+      }
+    ]
+  },
+  "lz4": {
+    "file": "v3-lz4.ba2",
+    "entries": [
+      {
+        "path": "textures/wall.dds",
+        "kind": "GNRL",
+        "size": 2048,
+        "compressed": true,
+        "sha256": "593237a90c58e3ddb67d4df6bb49dda3fbbabae9028a9c8f64b12d220df5a705"
+      },
+      {
+        "path": "scripts/config.txt",
+        "kind": "GNRL",
+        "size": 190,
+        "compressed": true,
+        "sha256": "400f5a1a8897ee1101d93bcd21d728ab1b5bc9fe22f57187375be71b7089a6e2"
+      }
+    ]
+  },
+  "rawDeflate": {
+    "file": "raw-deflate.ba2",
+    "entries": [
+      {
+        "path": "data.bin",
+        "kind": "GNRL",
+        "size": 1024,
+        "compressed": true,
+        "sha256": "0c31c0c4c91b395d7284e04d47245b68ebec72bddf622696efc3293dce2619da"
       }
     ]
   }

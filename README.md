@@ -1,8 +1,8 @@
 # ba2-toolkit
 
-Reader and extractor for Bethesda **BA2** (`BTDX`) archives, written in TypeScript for
-Node.js and tuned for the multi-gigabyte archives that ship with Fallout 4, Fallout 76
-and Starfield.
+Reader, extractor and writer for Bethesda **BA2** (`BTDX`) archives, written in
+TypeScript for Node.js and tuned for the multi-gigabyte archives that ship with
+Fallout 4, Fallout 76 and Starfield.
 
 ## Supported games
 
@@ -11,7 +11,7 @@ and Starfield.
 | Fallout 4 (original) | 1 | `GNRL` and `DX10`, including DDS reconstruction |
 | Fallout 4 Next Gen | 7, 8 | Same 24-byte header and records as version 1 |
 | Fallout 76 | 1 | `GNRL` and `DX10`; byte-validated against all 72 shipping archives |
-| Starfield | 2, 3 | zlib `GNRL`/`DX10`; v3 LZ4-block archives are rejected with a clear error |
+| Starfield | 2, 3 | zlib `GNRL`/`DX10`, plus version 3 LZ4-block payloads (read and written) |
 | Skyrim, Oblivion, Morrowind | BSA, not BA2 | Not supported — different container |
 
 The container is detected from the file itself (magic, version and `GNRL`/`DX10` tag),
@@ -21,7 +21,8 @@ BA2 files with more than one chunk per `GNRL` entry.
 
 Fallout 76 is the only install that was available for the byte-level checks here;
 Fallout 4 shares the same version 1 layout, while the version 2/3/7/8 header offsets are
-covered by unit tests.
+covered by unit tests and the committed version 3 fixture. No Starfield install was
+available, so Starfield archives are exercised through synthetic v3 fixtures.
 
 Bethesda's own `Archive2.exe` (from the Fallout 4 Creation Kit) is the second reference:
 it extracts shipping F76 archives to the same bytes this reader produces, and three
@@ -31,8 +32,11 @@ version 8, not version 1 — which is why the header version is handled explicit
 - Reads the archive table once, then fetches payloads with positional reads, so a
   4 GiB archive never has to fit in memory. The format is documented in
   [FORMAT.md](FORMAT.md).
-- Decompresses with Node's native `zlib` (C libz, not a JS inflate) on a pool of
-  worker threads.
+- Decompresses zlib payloads with Node's native `zlib` (C libz, not a JS inflate) on a
+  pool of worker threads, with a raw-deflate fallback for streams that lack the zlib
+  wrapper.
+- Decodes Starfield v3 LZ4 **blocks** (the raw block format, not LZ4 frames) itself, and
+  encodes them when creating v3 archives.
 - Rebuilds complete `.dds` files for `DX10` texture archives, including BC5/BC6H/BC7
   through a proper `DDS_HEADER_DXT10`, so the output opens in any modern DDS reader.
 - No runtime dependencies. `typescript` and `@types/node` are dev-only.
@@ -60,6 +64,11 @@ node dist/cli.js extract "SeventySix - Materials.ba2" "SeventySix - Sounds01.ba2
 
 # Verify every payload without writing anything
 node dist/cli.js extract "SeventySix - Animations.ba2" --out out --dry-run
+
+# Create archives (zlib is the default; none stores, lz4 is Starfield v3 only)
+node dist/cli.js create MyMod - Textures.ba2 ./textures
+node dist/cli.js create patch.ba2 ./loose --format GNRL --compression none
+node dist/cli.js create starfield.ba2 ./assets --version 3 --compression lz4
 ```
 
 `npm link` (or `npm install -g .`) exposes the same commands as `ba2`.
@@ -69,6 +78,7 @@ node dist/cli.js extract "SeventySix - Animations.ba2" --out out --dry-run
 | `ba2 info <archive...>` | `--json` |
 | `ba2 list <archive...>` | `--filter <glob>`, `--json`, `--limit <n>` |
 | `ba2 extract <archive...>` | `--out <dir>`, `--filter <glob>`, `--threads <n>`, `--flat`, `--force`, `--dry-run` |
+| `ba2 create <archive> <dir>` | `--format <GNRL\|DX10>`, `--compression <zlib\|none\|lz4>`, `--version <1\|2\|3\|7\|8>`, `--max-chunks <n>`, `--chunk-size <n>`, `--nostrings` |
 
 `*` in `--filter` matches across directory separators, and matching is
 case-insensitive, so `--filter "*.dds"` selects every texture.
@@ -92,19 +102,44 @@ await extractArchive('SeventySix - Meshes.ba2', {
 ```
 
 Exports: `Ba2Archive` / `openArchive`, `extractArchive`, `compileFilter`,
-`buildDdsHeader`, `dxgiFormatName`, `mipChainSize`, plus the entry/header types.
+`Ba2Writer` / `createArchive`, `buildDdsHeader`, `dxgiFormatName`, `mipChainSize` /
+`mipLevelSize`, `encodeLZ4Block` / `decodeLZ4Block`, `archiveCompression` /
+`entryCompression`, plus the entry/header types.
 
 ## Format
 
 BA2 is Bethesda's `BTDX` container: a 24-byte header, a record table, the payloads and
-an optional name table at the end, with zlib-compressed payloads. Fallout 76 only ships
-version 1 archives in two flavours — `GNRL` (whole files, 36-byte records) and `DX10`
-(interleaved texture records whose mip chunks are rebuilt into `.dds` files).
+an optional name table at the end. Fallout 76 only ships version 1 archives in two
+flavours — `GNRL` (whole files, 36-byte records) and `DX10` (interleaved texture records
+whose mip chunks are rebuilt into `.dds` files).
 
 [FORMAT.md](FORMAT.md) is the full specification: every field and offset, version and
 compression differences, the DDS/DX10 header layout, mip-size math, cubemap and tiling
 rules, a worked hexdump, an extraction walkthrough with code snippets, the official
 Archive2 behaviour, and the validation numbers.
+
+### Compression
+
+| Codec | Where it appears | Direction |
+| --- | --- | --- |
+| zlib (RFC 1950) | every version except Starfield v3 method 3 | read and write |
+| raw deflate, no zlib wrapper | occasionally in modded/repacked archives | read (fallback) |
+| raw LZ4 block | Starfield version 3, header method `3` | read and write |
+| LZ4 frame | not used by BA2 | — |
+
+`packedSize == 0` in a record always means "stored verbatim", per file in `GNRL` and per
+chunk in `DX10`, so a single texture can mix compressed and stored chunks. The codec is
+archive-wide and comes from the header (version 3 only): `0` = zlib, `3` = LZ4 block.
+`ba2 info` prints it, `ba2 list` labels every entry `zlib`, `lz4` or `raw`, and
+`archive.compression` / `summary().compression` expose it to library users.
+
+Finding out what the other tools do took a survey; the details are in
+[FORMAT.md §3.3](FORMAT.md#33-how-the-reference-tools-handle-compression):
+Bethesda's Archive2 has three zlib modes (`None`, `Default` = 32 KiB window, `XBox` = a
+4 KiB window) and no LZ4; BSA Browser's `Sharp.BSA.BA2` decodes LZ4 for `DX10` chunks
+only and reads the v3 method from the wrong header field; the two Python batch tools
+shell out to `bsab.exe` and contain no codec. That is why the LZ4 path is validated
+against an independent LZ4 implementation instead of another BA2 tool.
 
 ### The Fallout 4 Creation Kit is Bethesda's own validator
 
@@ -122,8 +157,10 @@ though the install in this repository is the Creation Kit only (its `Data` folde
 ### Limits
 
 - `GNMF` (PlayStation GNF textures) is rejected.
-- Archive versions whose header declares a non-zlib compression method (Starfield v3,
-  LZ4 block) are rejected with an explicit error instead of producing garbage.
+- Version 3 compression methods other than `0` (zlib) and `3` (LZ4 block) are rejected
+  with an explicit error instead of being guessed at.
+- `--compression lz4` needs `--version 3`; every other version is zlib-only, and the
+  writer enforces that instead of emitting an archive no game can read.
 - Xbox One tiled textures (`tile mode != 8`) keep their raw layout; they are reported
   but cannot be written as usable DDS files.
 - BA2 filename hashes are not needed for extraction and are only exposed as metadata.
@@ -156,25 +193,38 @@ the small archives committed under `test/fixtures/`:
 | `archive2/general-v8.ba2` (727 B) | version 8 GNRL archive written by Bethesda's Archive2 (zero-byte file skipped) |
 | `archive2/dds-v8.ba2` (1.1 KB) | Archive2 DX10 records built by importing the fixture DDS files |
 | `archive2/nostrings-v8.ba2` (19 KB) | version 8 GNRL archive with `name table offset = 0` |
+| `v3-lz4.ba2` (637 B) | Starfield version 3 GNRL archive, method `3`, two raw LZ4 blocks |
+| `raw-deflate.ba2` (319 B) | version 1 archive whose payload is deflate without the zlib wrapper |
+| `lz4/reference-blocks.json` (61 KB) | eleven raw LZ4 blocks from lz4js plus their gzip-compressed expected output |
 
-They use the shipping BTDX version 1 layout and real zlib streams, but the payloads
-are generated, so no Bethesda data is redistributed. `test/fixtures/manifest.json`
-records the expected size and SHA-256 of every entry, which the tests compare against
-the extracted files. The suite covers record and name-table parsing, stored vs
-compressed payloads, DX10 chunks, DDS/DX10 headers, cubemap flags, extraction
-(serial and worker pool), filters, `--flat`, overwrite/skip, dry runs, malformed
-archives and the CLI.
+They use the shipping layouts and real compressed streams, but the payloads are
+generated, so no Bethesda data is redistributed. `test/fixtures/manifest.json` records
+the expected size and SHA-256 of every entry, which the tests compare against the
+extracted files. The suite covers record and name-table parsing, stored vs compressed
+payloads, every archive version, zlib and LZ4 decoding, LZ4 encoding (round trips for
+`GNRL` and multi-chunk `DX10`), the deflate fallback, malformed LZ4 blocks, DX10 chunks,
+DDS/DX10 headers, cubemap flags, extraction (serial and worker pool), filters, `--flat`,
+overwrite/skip, dry runs, malformed archives and the CLI.
 
-The payloads were also cross-checked byte for byte against BSA Browser's
-`Sharp.BSA.BA2` reader: all 30 170 entries of `SeventySix - Materials.ba2` and 800
-textures from `SeventySix - Textures01.ba2` came out identical, and that reader
-also parses the fixtures above. Bethesda's `Archive2` extracted the same 30 170 files
+The LZ4 codec was cross-checked in both directions against `lz4js`, an independent port
+of the reference C implementation: 75 blocks / 4.21 MiB encoded by either side decoded
+identically by the other, including the reference decoder's last-5-literals rule.
+
+For zlib and the container itself the payloads were also cross-checked byte for byte
+against BSA Browser's `Sharp.BSA.BA2` reader: all 30 170 entries of
+`SeventySix - Materials.ba2` and 800 textures from `SeventySix - Textures01.ba2` came
+out identical, and that reader also parses the fixtures above. Bethesda's `Archive2` extracted the same 30 170 files
 identically, and it reads the committed fixtures too — including the ones it wrote
 itself (`test/fixtures/archive2/`), which cover version 8 and name-table-less archives.
 
-`scripts/make-fixtures.mjs` regenerates the fixtures with `npm run fixtures`. The
-output is deterministic, so a regeneration after a format change should show a
-useful diff rather than random churn.
+`scripts/make-fixtures.mjs` regenerates the fixtures with `npm run fixtures` (after
+`npm run build`, which provides the LZ4 encoder). The output is deterministic, so a
+regeneration after a format change should show a useful diff rather than random churn.
+
+`scripts/verify-roundtrip.mjs <archive.ba2> [--compression zlib|none|lz4] [--version n]`
+extracts a real archive, rebuilds it from the extracted files and compares every entry,
+which is how the LZ4 writer was checked against shipping game data (30 170 `GNRL` files
+and 42.7 MB of textures both round-tripped byte-for-byte).
 
 `test/game-data.test.mjs` additionally validates a real installation: a header census
 of every `.ba2`, GNRL payloads from `SeventySix - Materials.ba2`, DDS output for
@@ -196,6 +246,10 @@ cross-checking this implementation:
 - Batch BA2 Unpacker source — <https://github.com/kazum1kun/ba2-batch-unpack>
 - BSA Browser (with .BA2 support) — <https://www.nexusmods.com/skyrimspecialedition/mods/1756>
 - BSA Browser source — <https://github.com/AlexxEG/BSA_Browser>
+- LZ4 block format specification —
+  <https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md>
+- lz4js (independent LZ4 implementation used for conformance testing) —
+  <https://github.com/Benzinga/lz4js>
 
 The Python tools only drive BSA Browser's `bsab.exe`; the format details and the
 byte-for-byte payload checks came from BSA Browser's `Sharp.BSA.BA2` library.

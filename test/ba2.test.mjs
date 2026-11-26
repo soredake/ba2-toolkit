@@ -5,9 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import zlib from 'node:zlib';
 import {
   Ba2Archive,
   compileFilter,
+  entryCompression,
   extractArchive,
   mipChainSize,
   mipLevelSize,
@@ -17,6 +19,8 @@ const FIXTURE_DIR = path.join(import.meta.dirname, 'fixtures');
 const manifest = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, 'manifest.json'), 'utf8'));
 const gnrlPath = path.join(FIXTURE_DIR, manifest.gnrl.file);
 const dx10Path = path.join(FIXTURE_DIR, manifest.dx10.file);
+const lz4Path = path.join(FIXTURE_DIR, manifest.lz4.file);
+const rawDeflatePath = path.join(FIXTURE_DIR, manifest.rawDeflate.file);
 const DDS_HEADER_SIZE = 148;
 
 function tempDir(label) {
@@ -357,12 +361,51 @@ test('fixtures: archive versions pick the right record table offset', () => {
     nextGen.close();
   }
 
-  // Starfield v3 stores the compression method 8 bytes into the extension.
-  const lz4 = patchedFixture(gnrlPath, 'v3-lz4', (data) => {
-    data.writeUInt32LE(3, 4);
-    data.writeUInt32LE(3, 0x20);
-  });
-  assert.throws(() => Ba2Archive.open(lz4), /LZ4/);
+  // Starfield v3 appends 12 header bytes, so a real v3 archive has its record
+  // table 12 bytes further in and every absolute offset shifted. Rebuild the
+  // fixture that way instead of only patching the version field.
+  const extendHeader = (source, extraBytes, patchExtension) => {
+    const original = fs.readFileSync(source);
+    const out = Buffer.alloc(original.length + extraBytes);
+    original.copy(out, 0, 0, 24);
+    original.copy(out, 24 + extraBytes, 24);
+    out.writeUInt32LE(3, 4);
+    patchExtension?.(out);
+    const nameOffset = Number(original.readBigUInt64LE(16));
+    if (nameOffset !== 0) out.writeBigUInt64LE(BigInt(nameOffset + extraBytes), 16);
+    const count = original.readUInt32LE(12);
+    for (let i = 0; i < count; i++) {
+      const base = 24 + extraBytes + i * 36;
+      const offset = Number(out.readBigUInt64LE(base + 16));
+      if (offset !== 0) out.writeBigUInt64LE(BigInt(offset + extraBytes), base + 16);
+    }
+    const target = path.join(tempDir('patched'), `v3-${extraBytes}.ba2`);
+    fs.writeFileSync(target, out);
+    return target;
+  };
+
+  // v3 with the zlib method: the record table is found 12 bytes in and the
+  // payload still inflates.
+  const zlibV3 = Ba2Archive.open(extendHeader(gnrlPath, 12, (out) => out.writeUInt32LE(0, 0x20)));
+  try {
+    assert.equal(zlibV3.header.extraHeaderBytes, 12);
+    assert.equal(zlibV3.header.recordTableOffset, 36);
+    assert.equal(zlibV3.header.compressionMethod, 0);
+    assert.equal(zlibV3.entries[0].path, 'interface/panel.swf');
+    assert.equal(zlibV3.readEntry(0).length, 1536);
+  } finally {
+    zlibV3.close();
+  }
+
+  // v3 with the LZ4 method: opening succeeds, but the zlib payload is not a
+  // valid LZ4 block, so decoding must fail loudly.
+  const lz4V3 = Ba2Archive.open(extendHeader(gnrlPath, 12, (out) => out.writeUInt32LE(3, 0x20)));
+  try {
+    assert.equal(lz4V3.header.compressionMethod, 3);
+    assert.throws(() => lz4V3.readEntry(0), /LZ4/);
+  } finally {
+    lz4V3.close();
+  }
 });
 
 test('fixtures: archives written by Bethesda Archive2', async () => {
@@ -468,4 +511,102 @@ test('fixtures: CLI list and extract', () => {
   );
   assert.match(output, /4 extracted/);
   assert.equal(walk(out).size, 4);
+});
+
+test('fixtures: Starfield v3 LZ4 archive reads end to end', () => {
+  const archive = Ba2Archive.open(lz4Path);
+  try {
+    // v3 is the only version with the 12 byte header extension, and method 3
+    // means every payload is a raw LZ4 block.
+    assert.equal(archive.header.version, 3);
+    assert.equal(archive.header.extraHeaderBytes, 12);
+    assert.equal(archive.header.recordTableOffset, 36);
+    assert.equal(archive.header.compressionMethod, 3);
+    assert.equal(archive.compression, 'lz4');
+
+    const summary = archive.summary();
+    assert.equal(summary.compression, 'lz4');
+    assert.equal(summary.compressedFiles, manifest.lz4.entries.length);
+
+    assert.deepEqual(
+      archive.entries.map((entry) => entry.path).sort(),
+      manifest.lz4.entries.map((entry) => entry.path).sort(),
+    );
+    for (const entry of archive.entries) {
+      const expected = manifest.lz4.entries.find((item) => item.path === entry.path);
+      assert.ok(expected, entry.path);
+      assert.equal(entryCompression(entry, archive.compression), 'lz4', entry.path);
+      assert.ok(entry.packedSize > 0, `${entry.path} should be LZ4 compressed`);
+      assert.ok(entry.packedSize < entry.unpackedSize, `${entry.path} should shrink`);
+      assert.equal(sha256(archive.readEntry(entry)), expected.sha256, entry.path);
+    }
+  } finally {
+    archive.close();
+  }
+});
+
+test('fixtures: v3 LZ4 archive extracts and filters like any other', async () => {
+  const out = tempDir('lz4-extract');
+  const result = await extractArchive(lz4Path, { outDir: out, threads: 2 });
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.extracted, manifest.lz4.entries.length);
+  const files = walk(out);
+  assert.deepEqual([...files.keys()].sort(), manifest.lz4.entries.map((entry) => entry.path).sort());
+  for (const [relative, file] of files) {
+    const expected = manifest.lz4.entries.find((entry) => entry.path === relative);
+    assert.equal(sha256(fs.readFileSync(file)), expected.sha256, relative);
+  }
+
+  // Filters work on LZ4 archives too (the filter runs before decompression).
+  const filtered = tempDir('lz4-filter');
+  await extractArchive(lz4Path, { outDir: filtered, threads: 1, filter: '*.txt' });
+  assert.deepEqual([...walk(filtered).keys()], ['scripts/config.txt']);
+});
+
+test('fixtures: raw deflate payloads fall back when zlib framing is missing', () => {
+  const archive = Ba2Archive.open(rawDeflatePath);
+  try {
+    assert.equal(archive.header.version, 1);
+    assert.equal(archive.compression, 'zlib');
+    assert.equal(archive.entries.length, 1);
+    const [entry] = archive.entries;
+    assert.equal(entry.path, 'data.bin');
+    assert.ok(entry.packedSize > 0);
+
+    // The stored bytes really are bare deflate: zlib framing rejects them.
+    const stored = archive.readStored(entry.offset, entry.packedSize);
+    assert.throws(
+      () => zlib.inflateSync(stored),
+      /incorrect header check|unknown compression method/,
+    );
+    assert.equal(zlib.inflateRawSync(stored).length, entry.unpackedSize);
+
+    const expected = manifest.rawDeflate.entries[0];
+    assert.equal(sha256(archive.readEntry(entry)), expected.sha256);
+  } finally {
+    archive.close();
+  }
+});
+
+test('fixtures: CLI reports LZ4 and zlib compression', () => {
+  const cli = path.join(process.cwd(), 'dist', 'cli.js');
+  const run = (...args) => execFileSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
+
+  // Archive level: the info command names the codec of the whole archive.
+  assert.match(run('info', lz4Path), /compression : lz4/);
+  assert.match(run('info', gnrlPath), /compression : zlib/);
+  assert.match(run('info', rawDeflatePath), /compression : zlib/);
+
+  // Entry level: list shows the codec (or "raw ") per entry and in JSON.
+  assert.match(run('list', lz4Path), /\blz4\b\s+scripts\/config\.txt/);
+  const rows = JSON.parse(run('list', lz4Path, '--json'));
+  assert.deepEqual(rows.map((row) => row.compression), ['lz4', 'lz4']);
+  assert.ok(rows.every((row) => row.compressed === true));
+
+  const zlibRows = JSON.parse(run('list', gnrlPath, '--json'));
+  assert.deepEqual(
+    zlibRows.map((row) => row.compression),
+    ['zlib', 'none', 'zlib', 'none'],
+  );
+  assert.match(run('list', gnrlPath), /\braw\b\s+materials\/steel\.bgsm/);
 });
